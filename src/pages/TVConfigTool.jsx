@@ -155,42 +155,97 @@ export default function TVConfigTool() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-5 py-6 space-y-6">
+      <main className="max-w-6xl mx-auto px-5 py-6 space-y-4">
         <FileDropzone onFile={loadFile} file={file} onClear={() => { setFile(null); setBytes(null); setDirty(false); }} />
 
         {bytes && (
           <>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <Stat label="File size" value={formatBytes(bytes.length)} />
-              <Stat label="Config entries" value={String(entries.filter(e => e.type === 'kv').length)} />
-              <Stat label="Strings found" value={String(entries.length)} />
-              <Stat label="Status" value={dirty ? 'Modified' : 'Original'} accent={dirty} />
-            </div>
-
-            <FirmwareHeaderPanel analysis={firmwareAnalysis} />
-
-            <div className="grid lg:grid-cols-[minmax(0,2.2fr)_minmax(320px,0.8fr)] gap-6">
-              <div className="lg:col-span-2 rounded-xl border border-border bg-card overflow-hidden">
-                <div className="flex border-b border-border">
-                  <TabBtn active={tab === 'hex'} onClick={() => setTab('hex')} icon={<Binary className="w-4 h-4" />}>Hex Editor</TabBtn>
-                  <TabBtn active={tab === 'config'} onClick={() => setTab('config')} icon={<FileCog className="w-4 h-4" />}>Config Values</TabBtn>
-                  {ext4Detected && (
-                    <TabBtn active={tab === 'ext4'} onClick={() => setTab('ext4')} icon={<HardDrive className="w-4 h-4" />}>ext4 Files</TabBtn>
-                  )}
+            <div className="grid lg:grid-cols-2 gap-4 items-stretch">
+              <div className="flex h-full flex-col gap-3">
+                <div className="grid grid-cols-2 gap-3">
+                  <Stat label="File size" value={formatBytes(bytes.length)} />
+                  <Stat label="Config entries" value={String(entries.filter(e => e.type === 'kv').length)} />
+                  <Stat label="Strings found" value={String(entries.length)} />
+                  <Stat label="Status" value={dirty ? 'Modified' : 'Original'} accent={dirty} />
                 </div>
-                <div className="p-3">
-                  {tab === 'hex' && <HexViewer bytes={bytes} onEditByte={editByte} highlight={crcHighlight} onSave={download} />}
-                  {tab === 'config' && <ConfigEditor entries={entries} bytes={bytes} onPatchString={patchString} />}
-                  {tab === 'ext4' && <Ext4Browser bytes={bytes} dirty={dirty} onPatched={(next) => { setBytes(next); setDirty(true); }} onDownload={download} onReset={revert} />}
-                </div>
+
+                <FirmwareHeaderPanel analysis={firmwareAnalysis} />
               </div>
 
-              <div className="rounded-xl border border-border bg-card p-4">
+              <div className="rounded-xl border border-border bg-card p-4 h-full">
                 <div className="flex items-center gap-2 mb-4">
                   <ShieldCheck className="w-5 h-5 text-emerald-600" />
                   <h2 className="text-sm font-semibold">CRC Checksum Repair</h2>
                 </div>
-                <CrcPanel bytes={bytes} onApply={applyCrc} config={crcConfig} onConfigChange={setCrcConfig} />
+
+                <CrcPanel
+                  bytes={bytes}
+                  onApply={applyCrc}
+                  config={crcConfig}
+                  onConfigChange={setCrcConfig}
+                />
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-border bg-card overflow-hidden">
+              <div className="flex border-b border-border">
+                <TabBtn
+                  active={tab === 'hex'}
+                  onClick={() => setTab('hex')}
+                  icon={<Binary className="w-4 h-4" />}
+                >
+                  Hex Editor
+                </TabBtn>
+
+                <TabBtn
+                  active={tab === 'config'}
+                  onClick={() => setTab('config')}
+                  icon={<FileCog className="w-4 h-4" />}
+                >
+                  Config Values
+                </TabBtn>
+
+                {ext4Detected && (
+                  <TabBtn
+                    active={tab === 'ext4'}
+                    onClick={() => setTab('ext4')}
+                    icon={<HardDrive className="w-4 h-4" />}
+                  >
+                    ext4 Files
+                  </TabBtn>
+                )}
+              </div>
+
+              <div className="p-3">
+                {tab === 'hex' && (
+                  <HexViewer
+                    bytes={bytes}
+                    onEditByte={editByte}
+                    highlight={crcHighlight}
+                    onSave={download}
+                  />
+                )}
+
+                {tab === 'config' && (
+                  <ConfigEditor
+                    entries={entries}
+                    bytes={bytes}
+                    onPatchString={patchString}
+                  />
+                )}
+
+                {tab === 'ext4' && (
+                  <Ext4Browser
+                    bytes={bytes}
+                    dirty={dirty}
+                    onPatched={(next) => {
+                      setBytes(next);
+                      setDirty(true);
+                    }}
+                    onDownload={download}
+                    onReset={revert}
+                  />
+                )}
               </div>
             </div>
           </>
