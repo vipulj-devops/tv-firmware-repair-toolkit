@@ -169,7 +169,7 @@ export default function TVConfigTool() {
 
             <FirmwareHeaderPanel analysis={firmwareAnalysis} />
 
-            <div className="grid lg:grid-cols-3 gap-6">
+            <div className="grid lg:grid-cols-[minmax(0,2.2fr)_minmax(320px,0.8fr)] gap-6">
               <div className="lg:col-span-2 rounded-xl border border-border bg-card overflow-hidden">
                 <div className="flex border-b border-border">
                   <TabBtn active={tab === 'hex'} onClick={() => setTab('hex')} icon={<Binary className="w-4 h-4" />}>Hex Editor</TabBtn>

@@ -454,13 +454,13 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
 
   return (
     <div>
-      <div className="flex items-center gap-2 mb-3">
+      <div className="flex flex-wrap items-center gap-2 mb-3 min-w-0">
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <HardDrive className="w-3.5 h-3.5" /> {sb.blockSize} B · {regular.length} files · {dirCount} dirs
         </div>
         <div className="flex items-center gap-1.5 text-xs">
           {selectedFolder ? (
-            <span className="flex items-center gap-1 rounded-md bg-emerald-500/10 text-emerald-600 px-2 py-1 ring-1 ring-emerald-500/30">
+            <span className="flex items-center gap-1 rounded-md bg-emerald-500/10 text-emerald-600 px-2 py-1 ring-1 ring-emerald-500/30 shrink-0 max-w-[280px]">
               Scope: {selectedFolder}
               <button type="button" onClick={() => setSelectedFolder('')} className="hover:text-emerald-700 font-medium">×</button>
             </span>
@@ -468,7 +468,7 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
             <span className="text-muted-foreground px-2 py-1">Scope: all files</span>
           )}
         </div>
-        <div className="flex items-center gap-1 ml-auto">
+        <div className="flex flex-wrap items-center justify-end gap-1 ml-auto min-w-0">
           <button onClick={extractAll} disabled={extracting} className="flex items-center gap-1.5 text-xs rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white px-2.5 py-1.5 font-medium transition-colors">
             <Archive className="w-3.5 h-3.5" /> {extracting ? 'Extracting…' : (selectedFolder ? 'Extract selected' : 'Extract all')}
           </button>
@@ -479,7 +479,7 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
           <button onClick={() => setExpanded(Object.fromEntries(files.filter((f) => f.isDir).map((f) => [f.path, true])))} className="text-xs rounded-md border border-border hover:bg-accent px-2.5 py-1.5">Expand all</button>
           <button onClick={() => setExpanded({ '/': true })} className="text-xs rounded-md border border-border hover:bg-accent px-2.5 py-1.5">Collapse all</button>
           <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter files…"
-            className="rounded-md border border-input bg-background px-2.5 py-1.5 text-xs outline-none focus:ring-2 focus:ring-emerald-500/40 w-36" />
+            className="rounded-md border border-input bg-background px-2.5 py-1.5 text-xs outline-none focus:ring-2 focus:ring-emerald-500/40 w-36 max-w-full" />
         </div>
       </div>
 
