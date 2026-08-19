@@ -476,7 +476,6 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
             <FolderInput className="w-3.5 h-3.5" /> {bulkBusy ? 'Replacing…' : (selectedFolder ? 'Replace selected' : 'Replace all')}
           </button>
           <button onClick={() => handleAddFile(selectedFolder)} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white px-2.5 py-1.5 font-medium transition-colors max-w-[260px]"><FilePlus className="w-3.5 h-3.5 shrink-0" /> <span className="truncate">Add file to {selectedFolder || '/'}</span></button>
-          <button onClick={() => setExpanded(Object.fromEntries(files.filter((f) => f.isDir).map((f) => [f.path, true])))} className="text-xs rounded-md border border-border hover:bg-accent px-2.5 py-1.5">Expand all</button>
           <button onClick={() => setExpanded({ '/': true })} className="text-xs rounded-md border border-border hover:bg-accent px-2.5 py-1.5">Collapse all</button>
           <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter files…"
             className="rounded-md border border-input bg-background px-2.5 py-1.5 text-xs outline-none focus:ring-2 focus:ring-emerald-500/40 w-36 max-w-full" />
