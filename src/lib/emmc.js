@@ -2,7 +2,7 @@
 // Standard EMMC sector size = 512 bytes. Handles full dumps where boot partitions
 // may precede the user area by scanning for the "EFI PART" GPT signature.
 
-import { crc32Init, crc32Update, crc32Final } from '@/lib/crc32';
+import { crc32Init, crc32Update, crc32Final } from './crc32.js';
 
 const SECTOR = 512;
 

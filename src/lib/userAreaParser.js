@@ -1,9 +1,10 @@
 // User-area partition parser for EMMC dumps.
 // Detects the SoC / partition-table format from the USER AREA only (no boot0/boot1)
 // and parses vendor-specific tables: Amlogic AMLS MBR, MStar header, Novatek NVTK,
-// HiSilicon fastboot, Realtek U-Boot env (mtdparts). Also detects the filesystem
-// type of each parsed partition (ext4, f2fs, Android boot, squashfs, sparse, UBIFS,
-// JFFS2, raw). Standard GPT/MBR are detected here but parsed by emmc.js.
+// HiSilicon fastboot, HiSilicon 512-byte eMMC map (0x1630/0x5840), Realtek U-Boot
+// env (mtdparts). Also detects the filesystem type of each parsed partition (ext4,
+// f2fs, Android boot, squashfs, sparse, UBIFS, JFFS2, raw). Standard GPT/MBR are
+// detected here but parsed by emmc.js.
 
 const SECTOR = 512;
 
@@ -43,6 +44,55 @@ const NVTK = [0x4e, 0x56, 0x54, 0x4b]; // "NVTK"
 const ANDROID = [0x41, 0x4e, 0x44, 0x52, 0x4f, 0x49, 0x44, 0x21]; // "ANDROID!"
 const HISILICON = [0x48, 0x49, 0x53, 0x49, 0x4c, 0x49, 0x43, 0x4f, 0x4e]; // "HISILICON"
 
+// HiSilicon USER-area eMMC map (512-byte records). Header magic 0x1630 at 0;
+// entries magic 0x5840. The u32 at header+0x10 is unused (not a partition count).
+const HISI_EMMC_MAP_HDR = 0x1630;
+const HISI_EMMC_MAP_ENT = 0x5840;
+const HISI_EMMC_MAP_REC = 512;
+const HISI_EMMC_MAP_NAME_RE = /^[\w.\-]{3,32}$/;
+
+function hisiEmmcMapName(bytes, offset) {
+  return ascii(bytes, offset, 32);
+}
+
+function isHisiEmmcMapEntry(bytes, recOff) {
+  if (recOff + 0x20 > bytes.length) return false;
+  if (u32le(bytes, recOff) !== HISI_EMMC_MAP_ENT) return false;
+  if (u32le(bytes, recOff + 4) !== 0) return false;
+  const startLba = u32le(bytes, recOff + 8);
+  const sizeLba = u32le(bytes, recOff + 12);
+  if (startLba === 0 || sizeLba === 0) return false;
+  const name = hisiEmmcMapName(bytes, recOff + 16);
+  if (!HISI_EMMC_MAP_NAME_RE.test(name)) return false;
+  return true;
+}
+
+// Strict detector: header magics + reserved zeros + first 0x5840 entry with
+// reserved-zero, non-zero LBAs, and a printable partition name. A lone 0x1630
+// is not enough.
+export function isHisiEmmcMap(bytes) {
+  if (!bytes || bytes.length < HISI_EMMC_MAP_REC + 0x20) return false;
+  if (u32le(bytes, 0) !== HISI_EMMC_MAP_HDR) return false;
+  if (u32le(bytes, 4) !== 0 || u32le(bytes, 8) !== 0 || u32le(bytes, 12) !== 0) return false;
+  return isHisiEmmcMapEntry(bytes, HISI_EMMC_MAP_REC);
+}
+
+function parseHisiEmmcMap(bytes, fileSize) {
+  const parts = [];
+  const limit = Math.floor(bytes.length / HISI_EMMC_MAP_REC);
+  for (let i = 1; i < limit; i++) {
+    const e = i * HISI_EMMC_MAP_REC;
+    if (!isHisiEmmcMapEntry(bytes, e)) break;
+    const startLba = u32le(bytes, e + 8);
+    const sizeLba = u32le(bytes, e + 12);
+    const offset = startLba * SECTOR;
+    const size = sizeLba * SECTOR;
+    if (!validRange(offset, size, fileSize)) break;
+    parts.push({ name: hisiEmmcMapName(bytes, e + 16), offset, size });
+  }
+  return parts;
+}
+
 // Detect SoC + partition-table type from the user area.
 export function detectSocUserArea(bytes) {
   if (hasBytes(bytes, 0, AMLS)) return { soc: 'amlogic', marker: 'AMLS MBR @0x0', tableType: 'aml_mbr' };
@@ -57,6 +107,10 @@ export function detectSocUserArea(bytes) {
   const rtkText = new TextDecoder('latin1').decode(bytes.subarray(0, rtkScan)).toUpperCase();
   if (rtkText.includes('REALTEK') || rtkText.includes('RTK')) return { soc: 'realtek', marker: 'Realtek signature', tableType: 'uboot_env' };
   if (u16(bytes, 0x1FE) === 0xAA55) return { soc: 'unknown', marker: 'MBR 0x55AA', tableType: 'mbr' };
+  // After existing signatures so GPT/MBR/MSTAR/NVTK/REALTEK/fastboot stay unchanged.
+  if (isHisiEmmcMap(bytes)) {
+    return { soc: 'hisilicon', marker: 'HISI eMMC map 0x1630/0x5840 @0', tableType: 'hisi_emmc_map' };
+  }
   return { soc: 'unknown', marker: 'No signature found', tableType: 'none' };
 }
 
@@ -248,6 +302,7 @@ export function analyzeUserArea(bytes, fileSize) {
     case 'nvtk': parts = parseNovatekHeader(bytes, fileSize); break;
     case 'fastboot': parts = parseHisiliconFastboot(bytes, fileSize); break;
     case 'uboot_env': parts = parseRealtek(bytes); break;
+    case 'hisi_emmc_map': parts = parseHisiEmmcMap(bytes, fileSize); break;
     default: parts = [];
   }
   for (const p of parts) {

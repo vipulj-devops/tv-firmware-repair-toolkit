@@ -13,7 +13,7 @@ const FS_COLORS = {
   raw: 'text-muted-foreground',
 };
 
-const VENDOR_TABLES = ['aml_mbr', 'mstar', 'nvtk', 'fastboot', 'uboot_env'];
+const VENDOR_TABLES = ['aml_mbr', 'mstar', 'nvtk', 'fastboot', 'uboot_env', 'hisi_emmc_map'];
 
 function hex(n) { return '0x' + n.toString(16).toUpperCase(); }
 

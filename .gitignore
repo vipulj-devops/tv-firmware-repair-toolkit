@@ -35,3 +35,7 @@ dist-ssr
 .vite
 base44/.app.jsonc
 Thumbs.db
+
+# Raw eMMC / firmware dumps — never commit reference images
+firmware-samples/
+EMMC_*.bin
