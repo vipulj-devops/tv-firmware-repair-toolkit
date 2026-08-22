@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it } from 'node:test';
@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {
   analyzeUserArea,
   detectSocUserArea,
-  isHisiEmmcMap,
+  isEmmc1630Map,
   userAreaToParts,
 } from '../src/lib/userAreaParser.js';
 import { autoMapPartitions, findGptOffset, hasGpt, parseMbr } from '../src/lib/emmc.js';
@@ -31,17 +31,18 @@ function w16(buf, off, val) {
   buf[off + 1] = (val >>> 8) & 0xff;
 }
 
-describe('HiSilicon eMMC Part_Map (0x1630/0x5840)', () => {
+describe('eMMC 0x1630/0x5840 Map', () => {
   it('detects a valid map from the truncated reference fixture', () => {
     const det = detectSocUserArea(fixture);
-    assert.equal(det.tableType, 'hisi_emmc_map');
-    assert.equal(det.soc, 'hisilicon');
-    assert.equal(isHisiEmmcMap(fixture), true);
+    assert.equal(det.tableType, 'emmc_1630_5840');
+    assert.notEqual(det.soc, 'hisilicon');
+    assert.equal(det.soc, 'unknown');
+    assert.equal(isEmmc1630Map(fixture), true);
   });
 
   it('decodes MBOOT, MPOOL, and vbmeta_a with LBA*512 conversion', () => {
     const analysis = analyzeUserArea(fixture, 0x3a3e00000);
-    assert.equal(analysis.tableType, 'hisi_emmc_map');
+    assert.equal(analysis.tableType, 'emmc_1630_5840');
     const byName = Object.fromEntries(analysis.partitions.map((p) => [p.name, p]));
 
     assert.equal(byName.MBOOT.offset, 0x1000 * 512);
@@ -62,7 +63,7 @@ describe('HiSilicon eMMC Part_Map (0x1630/0x5840)', () => {
     const parts = userAreaToParts(analysis);
     assert.ok(parts.length >= 3);
     assert.equal(parts[0].name, 'MBOOT');
-    assert.equal(parts[0].ptType, 'hisi_emmc_map');
+    assert.equal(parts[0].ptType, 'emmc_1630_5840');
     assert.equal(parts[0].startByte, 0x200000);
     assert.equal(parts[0].size, 0x500000);
     assert.ok(!parts.some((p) => p.name === 'Part_Map'));
@@ -71,33 +72,33 @@ describe('HiSilicon eMMC Part_Map (0x1630/0x5840)', () => {
   it('rejects a malformed header (wrong magic or non-zero reserved fields)', () => {
     const badMagic = copy();
     w32(badMagic, 0, 0x9999);
-    assert.equal(isHisiEmmcMap(badMagic), false);
+    assert.equal(isEmmc1630Map(badMagic), false);
     assert.equal(detectSocUserArea(badMagic).tableType, 'none');
 
     const badReserved = copy();
     w32(badReserved, 4, 1);
-    assert.equal(isHisiEmmcMap(badReserved), false);
+    assert.equal(isEmmc1630Map(badReserved), false);
     assert.equal(detectSocUserArea(badReserved).tableType, 'none');
   });
 
   it('rejects a wrong first-entry magic', () => {
     const buf = copy();
     w32(buf, 0x200, 0x1111);
-    assert.equal(isHisiEmmcMap(buf), false);
+    assert.equal(isEmmc1630Map(buf), false);
     assert.equal(detectSocUserArea(buf).tableType, 'none');
   });
 
   it('rejects a non-printable / invalid first partition name', () => {
     const emptyName = copy();
     emptyName[0x210] = 0;
-    assert.equal(isHisiEmmcMap(emptyName), false);
+    assert.equal(isEmmc1630Map(emptyName), false);
 
     const binaryName = copy();
     binaryName[0x210] = 0x01;
     binaryName[0x211] = 0x02;
     binaryName[0x212] = 0x03;
     binaryName[0x213] = 0x04;
-    assert.equal(isHisiEmmcMap(binaryName), false);
+    assert.equal(isEmmc1630Map(binaryName), false);
     assert.equal(detectSocUserArea(binaryName).tableType, 'none');
   });
 });
@@ -122,7 +123,7 @@ describe('existing GPT detection is unchanged', () => {
     const bytes = gptBuffer();
     const det = detectSocUserArea(bytes);
     assert.equal(det.tableType, 'gpt');
-    assert.notEqual(det.tableType, 'hisi_emmc_map');
+    assert.notEqual(det.tableType, 'emmc_1630_5840');
   });
 
   it('still finds a GPT header via emmc.js', () => {
@@ -149,7 +150,7 @@ describe('existing MBR detection is unchanged', () => {
     const bytes = mbrBuffer();
     const det = detectSocUserArea(bytes);
     assert.equal(det.tableType, 'mbr');
-    assert.notEqual(det.tableType, 'hisi_emmc_map');
+    assert.notEqual(det.tableType, 'emmc_1630_5840');
   });
 
   it('still parses MBR via emmc.js and ignores the Part_Map fixture', () => {
@@ -167,3 +168,62 @@ describe('existing MBR detection is unchanged', () => {
 function u16le(bytes, o) {
   return bytes[o] | (bytes[o + 1] << 8);
 }
+
+function readHead(path, n) {
+  const size = statSync(path).size;
+  const fd = openSync(path, 'r');
+  const buf = Buffer.alloc(Math.min(n, size));
+  readSync(fd, buf, 0, buf.length, 0);
+  closeSync(fd);
+  return { bytes: new Uint8Array(buf), size };
+}
+
+const LOCAL_MSTAR1 = 'G:\\5800-a9k53g-op10\\userarea.bin';
+const LOCAL_MSTAR2 = 'G:\\mstar368\\ROM1_000000000000_0000E9000000.bin';
+
+const MSTAR1_NAMES = [
+  'MBOOT', 'MPOOL', 'vbmeta', 'tvcertificate', 'eeprom_a', 'tvconfig', 'swconfig',
+  'misc', 'recovery', 'boot', 'optee', 'armfw', 'RTPM', 'dtbo', 'metadata', 'frc',
+  'linux_rootfs_a', 'basic_a', '3rd_a', '3rd_rw', 'vbmeta_a', 'ciplus', 'OLED_data',
+  'dvbsdb_a', 'cha', 'chb', 'upgrade', 'schedpvr', 'demura', 'MBOOTBAK', 'oem',
+  'super', 'cache', 'tvservice', 'factory_a', 'vbmeta_system', 'userdata',
+];
+
+const MSTAR2_NAMES = [
+  'MBOOT', 'MPOOL', 'tvcertificate', 'eeprom_a', 'tvconfig', 'misc', 'recovery',
+  'boot', 'optee', 'armfw', 'RTPM', 'dtb', 'frc', 'linux_rootfs_a', '3rd_a',
+  '3rd_rw', 'vbmeta_a', 'cha', 'chb', 'system', 'cache', 'vendor', 'tvservice',
+  'factory_a', 'userdata',
+];
+
+describe('local 0x1630/0x5840 dumps (skipped if absent)', () => {
+  it('still parses G:\\\\5800-a9k53g-op10\\\\userarea.bin', { skip: !existsSync(LOCAL_MSTAR1) }, () => {
+    const { bytes, size } = readHead(LOCAL_MSTAR1, 0x10000);
+    const analysis = analyzeUserArea(bytes, size);
+    assert.equal(isEmmc1630Map(bytes), true);
+    assert.equal(analysis.tableType, 'emmc_1630_5840');
+    assert.notEqual(analysis.soc, 'hisilicon');
+    assert.equal(analysis.partitions.length, 37);
+    assert.deepEqual(analysis.partitions.map((p) => p.name), MSTAR1_NAMES);
+    assert.equal(analysis.partitions[0].offset, 0x200000);
+    assert.equal(analysis.partitions[0].size, 0x500000);
+    assert.equal(analysis.partitions[36].name, 'userdata');
+    assert.equal(analysis.partitions[36].offset, 0xc2400400);
+    assert.equal(analysis.partitions[36].size, 0x10fbfec00);
+  });
+
+  it('still parses G:\\\\mstar368\\\\ROM1 dump', { skip: !existsSync(LOCAL_MSTAR2) }, () => {
+    const { bytes, size } = readHead(LOCAL_MSTAR2, 0x10000);
+    const analysis = analyzeUserArea(bytes, size);
+    assert.equal(isEmmc1630Map(bytes), true);
+    assert.equal(analysis.tableType, 'emmc_1630_5840');
+    assert.notEqual(analysis.soc, 'hisilicon');
+    assert.equal(analysis.partitions.length, 25);
+    assert.deepEqual(analysis.partitions.map((p) => p.name), MSTAR2_NAMES);
+    assert.equal(analysis.partitions[0].offset, 0x200000);
+    assert.equal(analysis.partitions[0].size, 0x500000);
+    assert.equal(analysis.partitions[24].name, 'userdata');
+    assert.equal(analysis.partitions[24].offset, 0x6b3d0000);
+    assert.equal(analysis.partitions[24].size, 0x7dc2f000);
+  });
+});

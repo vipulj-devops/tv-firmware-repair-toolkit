@@ -1,7 +1,7 @@
 // User-area partition parser for EMMC dumps.
 // Detects the SoC / partition-table format from the USER AREA only (no boot0/boot1)
 // and parses vendor-specific tables: Amlogic AMLS MBR, Amlogic MPT (not AMLS), MStar header, Novatek NVTK,
-// HiSilicon fastboot, HiSilicon 512-byte eMMC map (0x1630/0x5840), Linux/U-Boot blkdevparts=mmcblk0:, Realtek U-Boot
+// HiSilicon fastboot, vendor-neutral eMMC 0x1630/0x5840 map, Linux/U-Boot blkdevparts=mmcblk0:, Realtek U-Boot
 // env (mtdparts). Also detects the filesystem type of each parsed partition (ext4,
 // f2fs, Android boot, squashfs, sparse, UBIFS, JFFS2, raw). Standard GPT/MBR are
 // detected here but parsed by emmc.js.
@@ -10,7 +10,7 @@ import { parseMbr } from './emmc.js';
 import { SECTOR, ascii, hasBytes, u16, u32le, u64le, validRange } from './userArea/binary.js';
 import { detectRegisteredFormat, parseRegisteredFormat } from './userArea/registry.js';
 
-export { isHisiEmmcMap } from './userArea/formats/hisiEmmcMap.js';
+export { isEmmc1630Map, isHisiEmmcMap } from './userArea/formats/emmc1630Map.js';
 export { findAmlMpt, isAmlMpt } from './userArea/formats/amlMpt.js';
 export { findBlkdevpartsMmc, isBlkdevpartsMmc } from './userArea/formats/blkdevpartsMmc.js';
 
@@ -262,7 +262,7 @@ export function analyzeUserArea(bytes, fileSize) {
     case 'nvtk': parts = parseNovatekHeader(bytes, fileSize); break;
     case 'fastboot': parts = parseHisiliconFastboot(bytes, fileSize); break;
     case 'uboot_env': parts = parseRealtek(bytes); break;
-    case 'hisi_emmc_map':
+    case 'emmc_1630_5840':
     case 'aml_mpt':
     case 'blkdevparts_mmc':
       parts = parseRegisteredFormat(det.tableType, bytes, fileSize);
@@ -280,7 +280,7 @@ export function analyzeUserArea(bytes, fileSize) {
 }
 
 // Convert the user-area analysis into the PartitionTable shape so vendor
-// user-area dumps (AMLS/MSTAR/NVTK/HISI) show an actionable partition table.
+// user-area dumps (AMLS/MSTAR/NVTK/fastboot) and registered maps show an actionable table.
 export function userAreaToParts(analysis) {
   if (!analysis || !analysis.partitions.length) return [];
   const out = [];

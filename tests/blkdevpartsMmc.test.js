@@ -8,7 +8,7 @@ import {
   detectSocUserArea,
   isAmlMpt,
   isBlkdevpartsMmc,
-  isHisiEmmcMap,
+  isEmmc1630Map,
   userAreaToParts,
 } from '../src/lib/userAreaParser.js';
 import { autoMapPartitions, findGptOffset, hasGpt, parseMbr } from '../src/lib/emmc.js';
@@ -151,11 +151,11 @@ describe('existing MBR detection is unchanged', () => {
   });
 });
 
-describe('existing HiSilicon Part_Map and Amlogic MPT are unchanged', () => {
-  it('still classifies the HiSilicon fixture as hisi_emmc_map', () => {
-    assert.equal(isHisiEmmcMap(hisiFixture), true);
+describe('existing eMMC 0x1630/0x5840 map and Amlogic MPT are unchanged', () => {
+  it('still classifies the 0x1630/0x5840 fixture as emmc_1630_5840', () => {
+    assert.equal(isEmmc1630Map(hisiFixture), true);
     const det = detectSocUserArea(hisiFixture, 0x3a3e00000);
-    assert.equal(det.tableType, 'hisi_emmc_map');
+    assert.equal(det.tableType, 'emmc_1630_5840');
     assert.notEqual(det.tableType, 'blkdevparts_mmc');
     assert.equal(isBlkdevpartsMmc(hisiFixture, 0x3a3e00000), false);
   });

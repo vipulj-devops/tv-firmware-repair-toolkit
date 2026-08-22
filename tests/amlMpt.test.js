@@ -8,7 +8,7 @@ import {
   detectSocUserArea,
   findAmlMpt,
   isAmlMpt,
-  isHisiEmmcMap,
+  isEmmc1630Map,
   userAreaToParts,
 } from '../src/lib/userAreaParser.js';
 import { autoMapPartitions, findGptOffset, hasGpt } from '../src/lib/emmc.js';
@@ -172,11 +172,11 @@ describe('existing GPT detection is unchanged with MPT present later', () => {
   });
 });
 
-describe('existing HiSilicon Part_Map detection is unchanged', () => {
-  it('still classifies the HiSilicon fixture as hisi_emmc_map, not aml_mpt', () => {
-    assert.equal(isHisiEmmcMap(hisiFixture), true);
+describe('existing eMMC 0x1630/0x5840 map detection is unchanged', () => {
+  it('still classifies the 0x1630/0x5840 fixture as emmc_1630_5840, not aml_mpt', () => {
+    assert.equal(isEmmc1630Map(hisiFixture), true);
     const det = detectSocUserArea(hisiFixture, 0x3a3e00000);
-    assert.equal(det.tableType, 'hisi_emmc_map');
+    assert.equal(det.tableType, 'emmc_1630_5840');
     assert.notEqual(det.tableType, 'aml_mpt');
     assert.equal(isAmlMpt(hisiFixture, 0x3a3e00000), false);
   });

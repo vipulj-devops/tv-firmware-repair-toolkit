@@ -492,7 +492,7 @@ export default function EmmcTool() {
 
 function ptTypeLabel(gptFound, userAreaAnalysis, partCount) {
   if (gptFound) return 'GPT';
-  if (userAreaAnalysis?.tableType === 'hisi_emmc_map') return 'HiSilicon eMMC Map';
+  if (userAreaAnalysis?.tableType === 'emmc_1630_5840') return 'eMMC 0x1630/0x5840 Map';
   if (userAreaAnalysis?.tableType === 'aml_mpt') return 'Amlogic MPT';
   if (userAreaAnalysis?.tableType === 'blkdevparts_mmc') return 'blkdevparts';
   if (partCount) return 'MBR';

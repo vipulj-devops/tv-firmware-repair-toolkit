@@ -32,7 +32,7 @@ function typeLabel(p) {
   if (p.ptType === 'emmc-rpmb') return 'RPMB';
   if (p.ptType === 'emmc-gp') return 'GP';
   if (p.ptType === 'vendor') return 'VENDOR';
-  if (p.ptType === 'hisi_emmc_map') return 'HiSilicon eMMC Map';
+  if (p.ptType === 'emmc_1630_5840') return 'eMMC 0x1630/0x5840 Map';
   if (p.ptType === 'aml_mpt') return 'Amlogic MPT';
   if (p.ptType === 'blkdevparts_mmc') return 'blkdevparts';
   return 'HW';

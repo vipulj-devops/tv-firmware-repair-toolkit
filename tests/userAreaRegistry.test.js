@@ -24,9 +24,9 @@ function w16(buf, off, val) {
 }
 
 describe('user-area strict format registry', () => {
-  it('keeps hisi_emmc_map before aml_mpt before blkdevparts_mmc', () => {
+  it('keeps emmc_1630_5840 before aml_mpt before blkdevparts_mmc', () => {
     assert.deepEqual(USER_AREA_STRICT_FORMATS.map((f) => f.id), [
-      'hisi_emmc_map',
+      'emmc_1630_5840',
       'aml_mpt',
       'blkdevparts_mmc',
     ]);
@@ -57,7 +57,7 @@ describe('user-area strict format registry', () => {
   });
 
   it('classifies existing fixtures through the same detectSocUserArea entry', () => {
-    assert.equal(detectSocUserArea(hisiFixture, 0x3a3e00000).tableType, 'hisi_emmc_map');
+    assert.equal(detectSocUserArea(hisiFixture, 0x3a3e00000).tableType, 'emmc_1630_5840');
     assert.equal(detectSocUserArea(mptFixture, 0x1d2000000).tableType, 'aml_mpt');
     assert.equal(detectSocUserArea(blkFixture, 0xe9000000).tableType, 'blkdevparts_mmc');
   });

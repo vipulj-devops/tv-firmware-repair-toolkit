@@ -67,8 +67,8 @@ describe('detection precedence: existing strict fixtures', () => {
     assert.equal(analyzeUserArea(mptFixture, ROM1_SIZE).partitions.length, 21);
   });
 
-  it('still detects the HiSilicon map fixture as hisi_emmc_map', () => {
-    assert.equal(detectSocUserArea(hisiFixture, HISI_SIZE).tableType, 'hisi_emmc_map');
+  it('still detects the eMMC 0x1630/0x5840 map fixture as emmc_1630_5840', () => {
+    assert.equal(detectSocUserArea(hisiFixture, HISI_SIZE).tableType, 'emmc_1630_5840');
   });
 
   it('still detects the blkdevparts fixture as blkdevparts_mmc', () => {
@@ -140,19 +140,19 @@ describe('detection precedence: strict registry beats usable MBR', () => {
     assert.equal(userAreaToParts(ua).length, 21);
   });
 
-  it('prefers hisi_emmc_map over a usable primary MBR in the same first sector', () => {
+  it('prefers emmc_1630_5840 over a usable primary MBR in the same first sector', () => {
     const bytes = Uint8Array.from(hisiFixture);
     writeUsableMbr(bytes);
     assert.equal(parseMbr(bytes, 0).length, 1);
-    assert.equal(detectSocUserArea(bytes, HISI_SIZE).tableType, 'hisi_emmc_map');
+    assert.equal(detectSocUserArea(bytes, HISI_SIZE).tableType, 'emmc_1630_5840');
   });
 });
 
 describe('detection precedence: weak strings and magics', () => {
-  it('keeps hisi_emmc_map when HISILICON ASCII is in the first 4 KB', () => {
+  it('keeps emmc_1630_5840 when HISILICON ASCII is in the first 4 KB', () => {
     const bytes = Uint8Array.from(hisiFixture);
     bytes.set(Buffer.from('HISILICON', 'ascii'), 64);
-    assert.equal(detectSocUserArea(bytes, HISI_SIZE).tableType, 'hisi_emmc_map');
+    assert.equal(detectSocUserArea(bytes, HISI_SIZE).tableType, 'emmc_1630_5840');
   });
 
   it('keeps blkdevparts_mmc when HISILICON ASCII is in the first 4 KB', () => {
