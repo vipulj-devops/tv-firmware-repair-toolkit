@@ -9,7 +9,8 @@ import CrcPanelEmmc from '@/components/emmc/CrcPanelEmmc';
 import FirmwareHeaderPanel from '@/components/firmware/FirmwareHeaderPanel';
 import { autoMapPartitions, hasGpt } from '@/lib/emmc';
 import { analyzeFirmware, firmwarePartitionsToParts } from '@/lib/firmwareParser';
-import { analyzeUserArea, userAreaToParts } from '@/lib/userAreaParser';
+import { analyzeUserArea } from '@/lib/userAreaParser';
+import { selectDumpParts } from '@/lib/userArea/selectDumpParts';
 import UserAreaAnalysis from '@/components/emmc/UserAreaAnalysis';
 import { formatBytes } from '@/lib/binaryUtils';
 import { isExt4 } from '@/lib/ext4';
@@ -43,13 +44,13 @@ export default function EmmcTool() {
   // When no GPT/MBR table is found, fall back to vendor-firmware parsed partitions
   // so Amlogic/MTK/LG/etc. images still show an actionable partition table.
   const userAreaAnalysis = useMemo(() => (gptBytes && file1 ? analyzeUserArea(gptBytes, file1.size) : null), [gptBytes, file1]);
-  const parts = useMemo(() => {
-    if (gptParts.length) return gptParts;
-    const ua = userAreaAnalysis ? userAreaToParts(userAreaAnalysis) : [];
-    if (ua.length) return ua;
-    return firmwareAnalysis ? firmwarePartitionsToParts(firmwareAnalysis, file1?.size || 0) : [];
-  }, [gptParts, userAreaAnalysis, firmwareAnalysis, file1]);
   const gptFound = gptBytes ? hasGpt(gptBytes) : false;
+  const parts = useMemo(() => selectDumpParts({
+    hasGpt: gptFound,
+    gptParts,
+    userAreaAnalysis,
+    firmwareParts: firmwareAnalysis ? firmwarePartitionsToParts(firmwareAnalysis, file1?.size || 0) : [],
+  }), [gptFound, gptParts, userAreaAnalysis, firmwareAnalysis, file1]);
   const dirty = Object.keys(replacements).length > 0;
 
   const addLog = (msg) => setLog((l) => [...l, { time: new Date().toLocaleTimeString(), msg }]);

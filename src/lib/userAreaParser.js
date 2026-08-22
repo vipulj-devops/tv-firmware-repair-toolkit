@@ -6,6 +6,7 @@
 // f2fs, Android boot, squashfs, sparse, UBIFS, JFFS2, raw). Standard GPT/MBR are
 // detected here but parsed by emmc.js.
 
+import { parseMbr } from './emmc.js';
 import { SECTOR, ascii, hasBytes, u16, u32le, u64le, validRange } from './userArea/binary.js';
 import { detectRegisteredFormat, parseRegisteredFormat } from './userArea/registry.js';
 
@@ -30,23 +31,53 @@ const NVTK = [0x4e, 0x56, 0x54, 0x4b]; // "NVTK"
 const ANDROID = [0x41, 0x4e, 0x44, 0x52, 0x4f, 0x49, 0x44, 0x21]; // "ANDROID!"
 const HISILICON = [0x48, 0x49, 0x53, 0x49, 0x4c, 0x49, 0x43, 0x4f, 0x4e]; // "HISILICON"
 
-// Detect SoC + partition-table type from the user area.
-export function detectSocUserArea(bytes, fileSize) {
-  if (hasBytes(bytes, 0, AMLS)) return { soc: 'amlogic', marker: 'AMLS MBR @0x0', tableType: 'aml_mbr' };
-  if (hasBytes(bytes, 0x200, EFI_PART) || hasBytes(bytes, 0x400, EFI_PART)) return { soc: 'mtk', marker: 'EFI PART (GPT)', tableType: 'gpt' };
-  if (hasBytes(bytes, 0x200, MSTAR)) return { soc: 'mstar', marker: 'MSTAR header @0x200', tableType: 'mstar' };
-  if (hasBytes(bytes, 0, NVTK)) return { soc: 'novatek', marker: 'NVTK header @0x0', tableType: 'nvtk' };
+function hasUsableParts(parts) {
+  return Array.isArray(parts) && parts.length >= 1;
+}
+
+function hasHisiliconMagic(bytes) {
   const hiScan = Math.min(bytes.length, 0x1000);
   for (let o = 0; o + 9 <= hiScan; o++) {
-    if (hasBytes(bytes, o, HISILICON)) return { soc: 'hisilicon', marker: 'HISILICON magic', tableType: 'fastboot' };
+    if (hasBytes(bytes, o, HISILICON)) return true;
   }
+  return false;
+}
+
+function hasRealtekText(bytes) {
   const rtkScan = Math.min(bytes.length, 0x1000);
   const rtkText = new TextDecoder('latin1').decode(bytes.subarray(0, rtkScan)).toUpperCase();
-  if (rtkText.includes('REALTEK') || rtkText.includes('RTK')) return { soc: 'realtek', marker: 'Realtek signature', tableType: 'uboot_env' };
-  if (u16(bytes, 0x1FE) === 0xAA55) return { soc: 'unknown', marker: 'MBR 0x55AA', tableType: 'mbr' };
-  // After existing signatures so GPT/MBR/MSTAR/NVTK/REALTEK/fastboot stay unchanged.
+  return rtkText.includes('REALTEK') || rtkText.includes('RTK');
+}
+
+// Detect SoC + partition-table type from the user area.
+// GPT signature stays first (parsed by emmc.js). Strict registry is next.
+// Heuristic magics / MBR only win if their existing parser returns >=1 partition.
+export function detectSocUserArea(bytes, fileSize) {
+  if (hasBytes(bytes, 0x200, EFI_PART) || hasBytes(bytes, 0x400, EFI_PART)) {
+    return { soc: 'mtk', marker: 'EFI PART (GPT)', tableType: 'gpt' };
+  }
   const registered = detectRegisteredFormat(bytes, fileSize);
-  if (registered) return registered;
+  if (registered && hasUsableParts(parseRegisteredFormat(registered.tableType, bytes, fileSize))) {
+    return registered;
+  }
+  if (hasBytes(bytes, 0, AMLS) && hasUsableParts(parseAmlogicMbr(bytes, fileSize))) {
+    return { soc: 'amlogic', marker: 'AMLS MBR @0x0', tableType: 'aml_mbr' };
+  }
+  if (hasBytes(bytes, 0x200, MSTAR) && hasUsableParts(parseMstarHeader(bytes, fileSize))) {
+    return { soc: 'mstar', marker: 'MSTAR header @0x200', tableType: 'mstar' };
+  }
+  if (hasBytes(bytes, 0, NVTK) && hasUsableParts(parseNovatekHeader(bytes, fileSize))) {
+    return { soc: 'novatek', marker: 'NVTK header @0x0', tableType: 'nvtk' };
+  }
+  if (hasHisiliconMagic(bytes) && hasUsableParts(parseHisiliconFastboot(bytes, fileSize))) {
+    return { soc: 'hisilicon', marker: 'HISILICON magic', tableType: 'fastboot' };
+  }
+  if (hasRealtekText(bytes) && hasUsableParts(parseRealtek(bytes))) {
+    return { soc: 'realtek', marker: 'Realtek signature', tableType: 'uboot_env' };
+  }
+  if (u16(bytes, 0x1FE) === 0xAA55 && hasUsableParts(parseMbr(bytes, 0))) {
+    return { soc: 'unknown', marker: 'MBR 0x55AA', tableType: 'mbr' };
+  }
   return { soc: 'unknown', marker: 'No signature found', tableType: 'none' };
 }
 
