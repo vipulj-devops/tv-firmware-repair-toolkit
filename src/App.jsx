@@ -7,6 +7,7 @@ import { AuthProvider, useAuth } from '@/lib/AuthContext';
 import UserNotRegisteredError from '@/components/UserNotRegisteredError';
 import ScrollToTop from './components/ScrollToTop';
 // Add page imports here
+import Home from './pages/Home';
 import TVConfigTool from './pages/TVConfigTool';
 import EmmcTool from './pages/EmmcTool';
 
@@ -37,7 +38,8 @@ const AuthenticatedApp = () => {
   return (
     <Routes>
       {/* Add your page Route elements here */}
-      <Route path="/" element={<TVConfigTool />} />
+      <Route path="/" element={<Home />} />
+      <Route path="/tvconfig" element={<TVConfigTool />} />
       <Route path="/emmc" element={<EmmcTool />} />
       <Route path="*" element={<PageNotFound />} />
     </Routes>

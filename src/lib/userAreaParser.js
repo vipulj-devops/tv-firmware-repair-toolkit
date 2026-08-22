@@ -1,6 +1,6 @@
 // User-area partition parser for EMMC dumps.
 // Detects the SoC / partition-table format from the USER AREA only (no boot0/boot1)
-// and parses vendor-specific tables: Amlogic AMLS MBR, MStar header, Novatek NVTK,
+// and parses vendor-specific tables: Amlogic AMLS MBR, Amlogic MPT (not AMLS), MStar header, Novatek NVTK,
 // HiSilicon fastboot, HiSilicon 512-byte eMMC map (0x1630/0x5840), Realtek U-Boot
 // env (mtdparts). Also detects the filesystem type of each parsed partition (ext4,
 // f2fs, Android boot, squashfs, sparse, UBIFS, JFFS2, raw). Standard GPT/MBR are
@@ -38,6 +38,7 @@ function parseSize(s) {
 }
 
 const AMLS = [0x41, 0x4d, 0x4c, 0x53]; // "AMLS"
+const MPT = [0x4d, 0x50, 0x54, 0x00]; // "MPT\0" — Amlogic media partition table (not AMLS)
 const EFI_PART = [0x45, 0x46, 0x49, 0x20, 0x50, 0x41, 0x52, 0x54]; // "EFI PART"
 const MSTAR = [0x4d, 0x53, 0x54, 0x41, 0x52]; // "MSTAR"
 const NVTK = [0x4e, 0x56, 0x54, 0x4b]; // "NVTK"
@@ -93,8 +94,70 @@ function parseHisiEmmcMap(bytes, fileSize) {
   return parts;
 }
 
+// Amlogic MPT (media partition table): "MPT\0" header, ASCII version, u32 count
+// at +0x10, 40-byte entries at +0x18. Offsets/sizes are bytes, not LBAs.
+// Distinct from AMLS-at-0 and from a later "AMLSECURITY" blob (do not scan AMLS).
+const AML_MPT_HDR = 0x18;
+const AML_MPT_ENT = 40;
+const AML_MPT_NAME_RE = /^[\w.\-]{2,16}$/;
+const AML_MPT_VER_RE = /^\d{2}\.\d{2}\.\d{2}$/;
+const AML_MPT_MAX_COUNT = 64;
+
+function isAmlMptEntry(bytes, recOff, fileSize) {
+  if (recOff + AML_MPT_ENT > bytes.length) return false;
+  const name = ascii(bytes, recOff, 16);
+  if (!AML_MPT_NAME_RE.test(name)) return false;
+  const size = u64le(bytes, recOff + 16);
+  const offset = u64le(bytes, recOff + 24);
+  return validRange(offset, size, fileSize);
+}
+
+function isAmlMptAt(bytes, off, fileSize) {
+  if (off < 0 || off + AML_MPT_HDR + AML_MPT_ENT > bytes.length) return false;
+  if (!hasBytes(bytes, off, MPT)) return false;
+  const version = ascii(bytes, off + 4, 8);
+  if (!AML_MPT_VER_RE.test(version)) return false;
+  const count = u32le(bytes, off + 0x10);
+  if (count < 1 || count > AML_MPT_MAX_COUNT) return false;
+  const tableEnd = off + AML_MPT_HDR + count * AML_MPT_ENT;
+  if (tableEnd > bytes.length) return false;
+  for (let i = 0; i < count; i++) {
+    if (!isAmlMptEntry(bytes, off + AML_MPT_HDR + i * AML_MPT_ENT, fileSize)) return false;
+  }
+  return true;
+}
+
+export function findAmlMpt(bytes, fileSize) {
+  if (!bytes) return -1;
+  const minLen = AML_MPT_HDR + AML_MPT_ENT;
+  // Sector-aligned scan: ROM1 MPT is at 0x2400000. Do not search for AMLS.
+  for (let o = 0; o + minLen <= bytes.length; o += SECTOR) {
+    if (isAmlMptAt(bytes, o, fileSize)) return o;
+  }
+  return -1;
+}
+
+export function isAmlMpt(bytes, fileSize) {
+  return findAmlMpt(bytes, fileSize) >= 0;
+}
+
+function parseAmlogicMpt(bytes, fileSize) {
+  const off = findAmlMpt(bytes, fileSize);
+  if (off < 0) return [];
+  const count = u32le(bytes, off + 0x10);
+  const parts = [];
+  for (let i = 0; i < count; i++) {
+    const e = off + AML_MPT_HDR + i * AML_MPT_ENT;
+    const name = ascii(bytes, e, 16);
+    const size = u64le(bytes, e + 16);
+    const offset = u64le(bytes, e + 24);
+    parts.push({ name, offset, size });
+  }
+  return parts;
+}
+
 // Detect SoC + partition-table type from the user area.
-export function detectSocUserArea(bytes) {
+export function detectSocUserArea(bytes, fileSize) {
   if (hasBytes(bytes, 0, AMLS)) return { soc: 'amlogic', marker: 'AMLS MBR @0x0', tableType: 'aml_mbr' };
   if (hasBytes(bytes, 0x200, EFI_PART) || hasBytes(bytes, 0x400, EFI_PART)) return { soc: 'mtk', marker: 'EFI PART (GPT)', tableType: 'gpt' };
   if (hasBytes(bytes, 0x200, MSTAR)) return { soc: 'mstar', marker: 'MSTAR header @0x200', tableType: 'mstar' };
@@ -110,6 +173,10 @@ export function detectSocUserArea(bytes) {
   // After existing signatures so GPT/MBR/MSTAR/NVTK/REALTEK/fastboot stay unchanged.
   if (isHisiEmmcMap(bytes)) {
     return { soc: 'hisilicon', marker: 'HISI eMMC map 0x1630/0x5840 @0', tableType: 'hisi_emmc_map' };
+  }
+  const mptOff = findAmlMpt(bytes, fileSize);
+  if (mptOff >= 0) {
+    return { soc: 'amlogic', marker: `Amlogic MPT @0x${mptOff.toString(16)}`, tableType: 'aml_mpt' };
   }
   return { soc: 'unknown', marker: 'No signature found', tableType: 'none' };
 }
@@ -294,7 +361,7 @@ export function parseAndroidBoot(bytes, offset) {
 
 export function analyzeUserArea(bytes, fileSize) {
   if (!bytes) return null;
-  const det = detectSocUserArea(bytes);
+  const det = detectSocUserArea(bytes, fileSize);
   let parts = [];
   switch (det.tableType) {
     case 'aml_mbr': parts = parseAmlogicMbr(bytes, fileSize); break;
@@ -303,6 +370,7 @@ export function analyzeUserArea(bytes, fileSize) {
     case 'fastboot': parts = parseHisiliconFastboot(bytes, fileSize); break;
     case 'uboot_env': parts = parseRealtek(bytes); break;
     case 'hisi_emmc_map': parts = parseHisiEmmcMap(bytes, fileSize); break;
+    case 'aml_mpt': parts = parseAmlogicMpt(bytes, fileSize); break;
     default: parts = [];
   }
   for (const p of parts) {

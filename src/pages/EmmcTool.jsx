@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { Link } from 'react-router-dom';
-import { Download, RotateCcw, HardDrive, FolderArchive, FolderInput, ArrowLeft, FileCog, Save, Upload, ShieldCheck } from 'lucide-react';
+import { Download, RotateCcw, HardDrive, FolderArchive, FolderInput, ArrowLeft, Save, Upload, ShieldCheck } from 'lucide-react';
+import ToolNav from '@/components/ToolNav';
 import FileDropzone from '@/components/tv/FileDropzone';
 import Ext4Browser from '@/components/tv/Ext4Browser';
 import LogPanel from '@/components/emmc/LogPanel';
@@ -126,7 +126,14 @@ export default function EmmcTool() {
     if (next.has(p.name)) next.delete(p.name); else next.add(p.name);
     return next;
   });
-  const toggleAll = () => setSelected((prev) => prev.size === parts.length ? new Set() : new Set(parts.map((p) => p.name)));
+  const toggleAll = (rowList = parts) => setSelected((prev) => {
+    const names = rowList.map((p) => p.name);
+    const allOn = names.length > 0 && names.every((n) => prev.has(n));
+    const next = new Set(prev);
+    if (allOn) names.forEach((n) => next.delete(n));
+    else names.forEach((n) => next.add(n));
+    return next;
+  });
 
   const saveSelected = async () => {
     const toSave = parts.filter((p) => selected.has(p.name));
@@ -350,12 +357,13 @@ export default function EmmcTool() {
         <header className="border-b border-border bg-card/50 backdrop-blur sticky top-0 z-10">
           <div className="max-w-6xl mx-auto px-5 py-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <button onClick={() => { setExplorePart(null); setExploreBytes(null); }} className="text-muted-foreground hover:text-foreground"><ArrowLeft className="w-4 h-4" /></button>
+              <button type="button" onClick={() => { setExplorePart(null); setExploreBytes(null); }} className="text-muted-foreground hover:text-foreground" aria-label="Back to partition table"><ArrowLeft className="w-4 h-4" /></button>
               <div className="w-9 h-9 rounded-lg bg-sky-600 flex items-center justify-center"><HardDrive className="w-5 h-5 text-white" /></div>
               <div>
                 <h1 className="text-base font-semibold tracking-tight">Explore: {explorePart.name}</h1>
                 <p className="text-xs text-muted-foreground">{formatBytes(explorePart.size)} · ext4 partition</p>
               </div>
+              <ToolNav current="emmc" />
             </div>
             <div className="flex items-center gap-2">
               <button onClick={revert} className="flex items-center gap-1.5 text-xs rounded-md border border-border px-3 py-1.5 hover:bg-accent transition-colors"><RotateCcw className="w-3.5 h-3.5" /> Revert</button>
@@ -392,7 +400,7 @@ export default function EmmcTool() {
               <h1 className="text-base font-semibold tracking-tight">EMMC Dump Tool</h1>
               <p className="text-xs text-muted-foreground">Analyze · Unpack · Repack · Partition</p>
             </div>
-            <Link to="/" className="ml-2 text-xs rounded-md border border-border px-2.5 py-1.5 hover:bg-accent transition-colors flex items-center gap-1.5"><FileCog className="w-3.5 h-3.5" /> TVConfig</Link>
+            <ToolNav current="emmc" />
           </div>
           {file1 && (
             <div className="flex items-center gap-2">
@@ -447,10 +455,10 @@ export default function EmmcTool() {
 
             <UserAreaAnalysis analysis={userAreaAnalysis} />
 
-            <div className="grid lg:grid-cols-3 gap-6">
-              <div className="lg:col-span-2 rounded-xl border border-border bg-card overflow-hidden">
-                <div className="px-3 py-2 border-b border-border text-sm font-semibold flex items-center gap-2"><HardDrive className="w-4 h-4 text-sky-600" /> Partition Table</div>
-                <div className="p-2">
+            <div className="grid lg:grid-cols-3 gap-6 lg:items-start">
+              <div className="lg:col-span-2 rounded-xl border border-border bg-card overflow-hidden flex flex-col min-h-0 max-h-[min(36rem,70vh)]">
+                <div className="px-3 py-2 border-b border-border text-sm font-semibold flex items-center gap-2 shrink-0"><HardDrive className="w-4 h-4 text-sky-600" /> Partition Table</div>
+                <div className="p-2 flex-1 min-h-0 flex flex-col">
                   <PartitionTable parts={parts} ext4Map={ext4Map} selected={selected} onToggle={toggleSelect} onToggleAll={toggleAll} onSave={savePartition} onReplace={(p) => { replaceTarget.current = p; replaceInputRef.current?.click(); }} onExplore={explore} />
                 </div>
               </div>
@@ -484,6 +492,7 @@ export default function EmmcTool() {
 function ptTypeLabel(gptFound, userAreaAnalysis, partCount) {
   if (gptFound) return 'GPT';
   if (userAreaAnalysis?.tableType === 'hisi_emmc_map') return 'HiSilicon eMMC Map';
+  if (userAreaAnalysis?.tableType === 'aml_mpt') return 'Amlogic MPT';
   if (partCount) return 'MBR';
   return 'None';
 }

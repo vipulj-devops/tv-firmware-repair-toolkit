@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
-import { Link } from 'react-router-dom';
 import { Download, RotateCcw, ShieldCheck, Binary, FileCog, HardDrive } from 'lucide-react';
+import ToolNav from '@/components/ToolNav';
 import FileDropzone from '@/components/tv/FileDropzone';
 import HexViewer from '@/components/tv/HexViewer';
 import ConfigEditor from '@/components/tv/ConfigEditor';
@@ -130,9 +130,7 @@ export default function TVConfigTool() {
               <h1 className="text-base font-semibold tracking-tight">TVConfig Repair Tool</h1>
               <p className="text-xs text-muted-foreground">Unpack · Modify · Rebuild · Auto CRC Repair</p>
             </div>
-            <Link to="/emmc" className="ml-2 text-xs rounded-md border border-border px-2.5 py-1.5 hover:bg-accent transition-colors flex items-center gap-1.5">
-              <HardDrive className="w-3.5 h-3.5" /> EMMC Tool
-            </Link>
+            <ToolNav current="tvconfig" />
           </div>
           {bytes && (
             <div className="flex items-center gap-2">
