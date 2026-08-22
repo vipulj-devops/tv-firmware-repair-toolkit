@@ -12,6 +12,17 @@ const TYPE_STYLES = {
   'vendor': 'bg-teal-500/10 text-teal-600',
 };
 
+const FS_COLORS = {
+  ext4: 'text-emerald-600',
+  f2fs: 'text-sky-600',
+  android_boot: 'text-amber-600',
+  squashfs: 'text-purple-600',
+  android_sparse: 'text-orange-600',
+  ubifs: 'text-rose-600',
+  jffs2: 'text-pink-600',
+  raw: 'text-muted-foreground',
+};
+
 function typeLabel(p) {
   if (p.ptType === 'gpt') return 'GPT';
   if (p.ptType === 'mbr') return `MBR·${p.typeName}`;
@@ -22,28 +33,38 @@ function typeLabel(p) {
   return 'HW';
 }
 
+// Prefer the user-area parser's fsType (same source as the old User Area Analysis
+// table). Overlay ext4Map, which EmmcTool fills via the existing 2 KB isExt4 probe
+// for partitions whose payload sits past the loaded head window.
+function filesystemLabel(p, ext4Map) {
+  if (ext4Map[p.name]) return 'ext4';
+  return p.fsType || 'raw';
+}
+
 export default function PartitionTable({ parts, ext4Map, selected, onToggle, onToggleAll, onSave, onReplace, onExplore }) {
   if (!parts.length) return <p className="text-sm text-muted-foreground p-4">No partitions found in this dump.</p>;
   const allSelected = parts.every((p) => selected.has(p.name));
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead>
+    <div className="max-h-[min(32rem,55vh)] overflow-auto">
+      <table className="w-full text-sm min-w-[40rem]">
+        <thead className="sticky top-0 z-10 bg-card">
           <tr className="text-left text-xs text-muted-foreground border-b border-border">
-            <th className="py-2 px-2 font-medium w-8">
+            <th className="py-2 px-2 font-medium w-8 bg-card">
               <input type="checkbox" checked={allSelected} onChange={onToggleAll} className="rounded" />
             </th>
-            <th className="py-2 px-2 font-medium">#</th>
-            <th className="py-2 px-2 font-medium">Name</th>
-            <th className="py-2 px-2 font-medium">Type</th>
-            <th className="py-2 px-2 font-medium">Start</th>
-            <th className="py-2 px-2 font-medium">Size</th>
-            <th className="py-2 px-2 font-medium text-right">Actions</th>
+            <th className="py-2 px-2 font-medium bg-card">#</th>
+            <th className="py-2 px-2 font-medium bg-card">Name</th>
+            <th className="py-2 px-2 font-medium bg-card">Type</th>
+            <th className="py-2 px-2 font-medium bg-card">Start</th>
+            <th className="py-2 px-2 font-medium bg-card">Size</th>
+            <th className="py-2 px-2 font-medium bg-card">Filesystem</th>
+            <th className="py-2 px-2 font-medium text-right bg-card">Actions</th>
           </tr>
         </thead>
         <tbody>
           {parts.map((p) => {
             const ext4 = ext4Map[p.name];
+            const fs = filesystemLabel(p, ext4Map);
             const isSel = selected.has(p.name);
             return (
               <tr key={`${p.ptType}-${p.index}`} className={`border-b border-border/50 hover:bg-accent/30 ${isSel ? 'bg-emerald-500/5' : ''}`}>
@@ -51,17 +72,15 @@ export default function PartitionTable({ parts, ext4Map, selected, onToggle, onT
                   <input type="checkbox" checked={isSel} onChange={() => onToggle(p)} className="rounded" />
                 </td>
                 <td className="py-2 px-2 text-muted-foreground">{p.index}</td>
-                <td className="py-2 px-2 font-mono">
-                  {p.name}
-                  {ext4 && <span className="text-[10px] text-sky-500 ml-1.5 align-middle">ext4</span>}
-                </td>
+                <td className="py-2 px-2 font-mono whitespace-nowrap">{p.name}</td>
                 <td className="py-2 px-2 text-xs">
                   <span className={`rounded px-1.5 py-0.5 font-medium ${TYPE_STYLES[p.ptType] || 'bg-muted text-muted-foreground'}`}>{typeLabel(p)}</span>
                 </td>
-                <td className="py-2 px-2 font-mono text-xs text-muted-foreground">0x{p.startByte.toString(16).toUpperCase()}</td>
-                <td className="py-2 px-2 font-mono text-xs">{formatBytes(p.size)}</td>
+                <td className="py-2 px-2 font-mono text-xs text-muted-foreground whitespace-nowrap">0x{p.startByte.toString(16).toUpperCase()}</td>
+                <td className="py-2 px-2 font-mono text-xs whitespace-nowrap">{formatBytes(p.size)}</td>
+                <td className={`py-2 px-2 font-mono text-xs whitespace-nowrap ${FS_COLORS[fs] || 'text-muted-foreground'}`}>{fs}</td>
                 <td className="py-2 px-2">
-                  <div className="flex items-center gap-1.5 justify-end">
+                  <div className="flex items-center gap-1.5 justify-end flex-wrap">
                     <button onClick={() => onSave(p)} className="flex items-center gap-1 text-xs rounded-md border border-border hover:bg-accent px-2 py-1 transition-colors">
                       <Save className="w-3 h-3" /> Save
                     </button>

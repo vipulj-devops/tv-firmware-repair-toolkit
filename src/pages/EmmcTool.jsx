@@ -424,7 +424,7 @@ export default function EmmcTool() {
           <>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <Stat label="Dump size" value={formatBytes(file1.size)} />
-              <Stat label="PT type" value={gptFound ? 'GPT' : (parts.length ? 'MBR' : 'None')} accent={parts.length > 0} />
+              <Stat label="PT type" value={ptTypeLabel(gptFound, userAreaAnalysis, parts.length)} accent={parts.length > 0} />
               <Stat label="Partitions" value={String(parts.length)} />
               <Stat label="Status" value={dirty ? `Modified (${Object.keys(replacements).length})` : 'Original'} accent={dirty} />
             </div>
@@ -481,11 +481,18 @@ export default function EmmcTool() {
   );
 }
 
+function ptTypeLabel(gptFound, userAreaAnalysis, partCount) {
+  if (gptFound) return 'GPT';
+  if (userAreaAnalysis?.tableType === 'hisi_emmc_map') return 'HiSilicon eMMC Map';
+  if (partCount) return 'MBR';
+  return 'None';
+}
+
 function Stat({ label, value, accent }) {
   return (
     <div className="rounded-xl border border-border bg-card px-4 py-3">
       <p className="text-xs text-muted-foreground">{label}</p>
-      <p className={`text-lg font-semibold mt-0.5 ${accent ? 'text-sky-600' : ''}`}>{value}</p>
+      <p className={`text-lg font-semibold mt-0.5 break-words ${accent ? 'text-sky-600' : ''}`}>{value}</p>
     </div>
   );
 }
