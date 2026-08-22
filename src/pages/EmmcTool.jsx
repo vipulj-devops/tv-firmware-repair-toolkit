@@ -493,6 +493,7 @@ function ptTypeLabel(gptFound, userAreaAnalysis, partCount) {
   if (gptFound) return 'GPT';
   if (userAreaAnalysis?.tableType === 'hisi_emmc_map') return 'HiSilicon eMMC Map';
   if (userAreaAnalysis?.tableType === 'aml_mpt') return 'Amlogic MPT';
+  if (userAreaAnalysis?.tableType === 'blkdevparts_mmc') return 'blkdevparts';
   if (partCount) return 'MBR';
   return 'None';
 }

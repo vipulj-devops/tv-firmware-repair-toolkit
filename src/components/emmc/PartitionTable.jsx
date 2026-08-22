@@ -32,6 +32,7 @@ function typeLabel(p) {
   if (p.ptType === 'emmc-rpmb') return 'RPMB';
   if (p.ptType === 'emmc-gp') return 'GP';
   if (p.ptType === 'vendor') return 'VENDOR';
+  if (p.ptType === 'blkdevparts_mmc') return 'blkdevparts';
   return 'HW';
 }
 
