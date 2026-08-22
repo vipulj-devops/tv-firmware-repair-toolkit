@@ -6,27 +6,13 @@
 // f2fs, Android boot, squashfs, sparse, UBIFS, JFFS2, raw). Standard GPT/MBR are
 // detected here but parsed by emmc.js.
 
-const SECTOR = 512;
+import { SECTOR, ascii, hasBytes, u16, u32le, u64le, validRange } from './userArea/binary.js';
+import { detectRegisteredFormat, parseRegisteredFormat } from './userArea/registry.js';
 
-function u16(b, o) { return b[o] | (b[o + 1] << 8); }
-function u32le(b, o) { return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0; }
-function u64le(b, o) { return u32le(b, o) + u32le(b, o + 4) * 0x100000000; }
-function ascii(b, o, len) {
-  if (o + len > b.length) len = Math.max(0, b.length - o);
-  let s = '';
-  for (let i = 0; i < len; i++) {
-    const c = b[o + i];
-    if (c === 0) break;
-    if (c >= 32 && c <= 126) s += String.fromCharCode(c);
-    else break;
-  }
-  return s;
-}
-function hasBytes(b, o, sig) {
-  if (o < 0 || o + sig.length > b.length) return false;
-  for (let i = 0; i < sig.length; i++) if (b[o + i] !== sig[i]) return false;
-  return true;
-}
+export { isHisiEmmcMap } from './userArea/formats/hisiEmmcMap.js';
+export { findAmlMpt, isAmlMpt } from './userArea/formats/amlMpt.js';
+export { findBlkdevpartsMmc, isBlkdevpartsMmc } from './userArea/formats/blkdevpartsMmc.js';
+
 function parseSize(s) {
   s = String(s).trim();
   if (!s) return 0;
@@ -38,211 +24,11 @@ function parseSize(s) {
 }
 
 const AMLS = [0x41, 0x4d, 0x4c, 0x53]; // "AMLS"
-const MPT = [0x4d, 0x50, 0x54, 0x00]; // "MPT\0" — Amlogic media partition table (not AMLS)
 const EFI_PART = [0x45, 0x46, 0x49, 0x20, 0x50, 0x41, 0x52, 0x54]; // "EFI PART"
 const MSTAR = [0x4d, 0x53, 0x54, 0x41, 0x52]; // "MSTAR"
 const NVTK = [0x4e, 0x56, 0x54, 0x4b]; // "NVTK"
 const ANDROID = [0x41, 0x4e, 0x44, 0x52, 0x4f, 0x49, 0x44, 0x21]; // "ANDROID!"
 const HISILICON = [0x48, 0x49, 0x53, 0x49, 0x4c, 0x49, 0x43, 0x4f, 0x4e]; // "HISILICON"
-
-// HiSilicon USER-area eMMC map (512-byte records). Header magic 0x1630 at 0;
-// entries magic 0x5840. The u32 at header+0x10 is unused (not a partition count).
-const HISI_EMMC_MAP_HDR = 0x1630;
-const HISI_EMMC_MAP_ENT = 0x5840;
-const HISI_EMMC_MAP_REC = 512;
-const HISI_EMMC_MAP_NAME_RE = /^[\w.\-]{3,32}$/;
-
-function hisiEmmcMapName(bytes, offset) {
-  return ascii(bytes, offset, 32);
-}
-
-function isHisiEmmcMapEntry(bytes, recOff) {
-  if (recOff + 0x20 > bytes.length) return false;
-  if (u32le(bytes, recOff) !== HISI_EMMC_MAP_ENT) return false;
-  if (u32le(bytes, recOff + 4) !== 0) return false;
-  const startLba = u32le(bytes, recOff + 8);
-  const sizeLba = u32le(bytes, recOff + 12);
-  if (startLba === 0 || sizeLba === 0) return false;
-  const name = hisiEmmcMapName(bytes, recOff + 16);
-  if (!HISI_EMMC_MAP_NAME_RE.test(name)) return false;
-  return true;
-}
-
-// Strict detector: header magics + reserved zeros + first 0x5840 entry with
-// reserved-zero, non-zero LBAs, and a printable partition name. A lone 0x1630
-// is not enough.
-export function isHisiEmmcMap(bytes) {
-  if (!bytes || bytes.length < HISI_EMMC_MAP_REC + 0x20) return false;
-  if (u32le(bytes, 0) !== HISI_EMMC_MAP_HDR) return false;
-  if (u32le(bytes, 4) !== 0 || u32le(bytes, 8) !== 0 || u32le(bytes, 12) !== 0) return false;
-  return isHisiEmmcMapEntry(bytes, HISI_EMMC_MAP_REC);
-}
-
-function parseHisiEmmcMap(bytes, fileSize) {
-  const parts = [];
-  const limit = Math.floor(bytes.length / HISI_EMMC_MAP_REC);
-  for (let i = 1; i < limit; i++) {
-    const e = i * HISI_EMMC_MAP_REC;
-    if (!isHisiEmmcMapEntry(bytes, e)) break;
-    const startLba = u32le(bytes, e + 8);
-    const sizeLba = u32le(bytes, e + 12);
-    const offset = startLba * SECTOR;
-    const size = sizeLba * SECTOR;
-    if (!validRange(offset, size, fileSize)) break;
-    parts.push({ name: hisiEmmcMapName(bytes, e + 16), offset, size });
-  }
-  return parts;
-}
-
-// Amlogic MPT (media partition table): "MPT\0" header, ASCII version, u32 count
-// at +0x10, 40-byte entries at +0x18. Offsets/sizes are bytes, not LBAs.
-// Distinct from AMLS-at-0 and from a later "AMLSECURITY" blob (do not scan AMLS).
-const AML_MPT_HDR = 0x18;
-const AML_MPT_ENT = 40;
-const AML_MPT_NAME_RE = /^[\w.\-]{2,16}$/;
-const AML_MPT_VER_RE = /^\d{2}\.\d{2}\.\d{2}$/;
-const AML_MPT_MAX_COUNT = 64;
-
-function isAmlMptEntry(bytes, recOff, fileSize) {
-  if (recOff + AML_MPT_ENT > bytes.length) return false;
-  const name = ascii(bytes, recOff, 16);
-  if (!AML_MPT_NAME_RE.test(name)) return false;
-  const size = u64le(bytes, recOff + 16);
-  const offset = u64le(bytes, recOff + 24);
-  return validRange(offset, size, fileSize);
-}
-
-function isAmlMptAt(bytes, off, fileSize) {
-  if (off < 0 || off + AML_MPT_HDR + AML_MPT_ENT > bytes.length) return false;
-  if (!hasBytes(bytes, off, MPT)) return false;
-  const version = ascii(bytes, off + 4, 8);
-  if (!AML_MPT_VER_RE.test(version)) return false;
-  const count = u32le(bytes, off + 0x10);
-  if (count < 1 || count > AML_MPT_MAX_COUNT) return false;
-  const tableEnd = off + AML_MPT_HDR + count * AML_MPT_ENT;
-  if (tableEnd > bytes.length) return false;
-  for (let i = 0; i < count; i++) {
-    if (!isAmlMptEntry(bytes, off + AML_MPT_HDR + i * AML_MPT_ENT, fileSize)) return false;
-  }
-  return true;
-}
-
-export function findAmlMpt(bytes, fileSize) {
-  if (!bytes) return -1;
-  const minLen = AML_MPT_HDR + AML_MPT_ENT;
-  // Sector-aligned scan: ROM1 MPT is at 0x2400000. Do not search for AMLS.
-  for (let o = 0; o + minLen <= bytes.length; o += SECTOR) {
-    if (isAmlMptAt(bytes, o, fileSize)) return o;
-  }
-  return -1;
-}
-
-export function isAmlMpt(bytes, fileSize) {
-  return findAmlMpt(bytes, fileSize) >= 0;
-}
-
-function parseAmlogicMpt(bytes, fileSize) {
-  const off = findAmlMpt(bytes, fileSize);
-  if (off < 0) return [];
-  const count = u32le(bytes, off + 0x10);
-  const parts = [];
-  for (let i = 0; i < count; i++) {
-    const e = off + AML_MPT_HDR + i * AML_MPT_ENT;
-    const name = ascii(bytes, e, 16);
-    const size = u64le(bytes, e + 16);
-    const offset = u64le(bytes, e + 24);
-    parts.push({ name, offset, size });
-  }
-  return parts;
-}
-
-function parseBlkdevpartsMmc(bytes, fileSize) {
-  const off = findBlkdevpartsMmc(bytes, fileSize);
-  if (off < 0) return [];
-  return parseBlkdevpartsBody(extractBlkdevpartsBody(bytes, off), fileSize) || [];
-}
-
-export function findBlkdevpartsMmc(bytes, fileSize) {
-  if (!bytes || !fileSize) return -1;
-  const prefix = 'blkdevparts=mmcblk0:';
-  const text = new TextDecoder('latin1').decode(bytes);
-  const lower = text.toLowerCase();
-  let from = 0;
-  while (from < lower.length) {
-    const i = lower.indexOf(prefix, from);
-    if (i < 0) return -1;
-    if (parseBlkdevpartsBody(extractBlkdevpartsBody(bytes, i), fileSize)) return i;
-    from = i + prefix.length;
-  }
-  return -1;
-}
-
-export function isBlkdevpartsMmc(bytes, fileSize) {
-  return findBlkdevpartsMmc(bytes, fileSize) >= 0;
-}
-
-function extractBlkdevpartsBody(bytes, specOff) {
-  const prefixLen = 'blkdevparts=mmcblk0:'.length;
-  let end = specOff + prefixLen;
-  while (end < bytes.length) {
-    const c = bytes[end];
-    if (c === 0 || c === 32 || c === 9 || c === 10 || c === 13 || c === 34) break;
-    end++;
-  }
-  if (end <= specOff + prefixLen) return '';
-  return new TextDecoder('latin1').decode(bytes.subarray(specOff + prefixLen, end));
-}
-
-function parseBlkdevpartsSizeToken(tok) {
-  if (tok === '-') return -1;
-  const m = String(tok).match(/^(\d+)([KMG]?)$/i);
-  if (!m) return null;
-  const n = parseInt(m[1], 10);
-  if (!Number.isFinite(n) || n < 0) return null;
-  const u = (m[2] || '').toUpperCase();
-  const mul = u === 'K' ? 1024 : u === 'M' ? 1048576 : u === 'G' ? 1073741824 : 1;
-  const size = n * mul;
-  if (!Number.isFinite(size) || size > 0x1000000000) return null;
-  return size;
-}
-
-const BLKDEV_NAME_RE = /^[\w.\-]{1,32}$/;
-
-// Strict parse of the comma-separated mmcblk0 body. Returns null unless every
-// entry is valid and the map ends exactly at fileSize (remainder `-` required
-// to consume the rest; no partial tables).
-function parseBlkdevpartsBody(body, fileSize) {
-  if (!body || !fileSize) return null;
-  const tokens = body.split(',');
-  if (!tokens.length) return null;
-  const parts = [];
-  let offset = 0;
-  for (let i = 0; i < tokens.length; i++) {
-    const tok = tokens[i];
-    const m = tok.match(/^(\d+[KMG]?|-)\(([^)]+)\)(ro)?$/i);
-    if (!m) return null;
-    const name = m[2];
-    if (!BLKDEV_NAME_RE.test(name)) return null;
-    const ro = (m[3] || '').toLowerCase() === 'ro';
-    const sizeTok = parseBlkdevpartsSizeToken(m[1]);
-    if (sizeTok == null) return null;
-    let size;
-    if (sizeTok < 0) {
-      if (i !== tokens.length - 1) return null;
-      size = fileSize - offset;
-      if (size <= 0) return null;
-    } else {
-      size = sizeTok;
-    }
-    if (offset < 0 || size <= 0) return null;
-    if (offset + size > fileSize) return null;
-    parts.push({ name, offset, size, ro });
-    offset += size;
-  }
-  if (!parts.length) return null;
-  if (offset !== fileSize) return null;
-  return parts;
-}
 
 // Detect SoC + partition-table type from the user area.
 export function detectSocUserArea(bytes, fileSize) {
@@ -259,17 +45,8 @@ export function detectSocUserArea(bytes, fileSize) {
   if (rtkText.includes('REALTEK') || rtkText.includes('RTK')) return { soc: 'realtek', marker: 'Realtek signature', tableType: 'uboot_env' };
   if (u16(bytes, 0x1FE) === 0xAA55) return { soc: 'unknown', marker: 'MBR 0x55AA', tableType: 'mbr' };
   // After existing signatures so GPT/MBR/MSTAR/NVTK/REALTEK/fastboot stay unchanged.
-  if (isHisiEmmcMap(bytes)) {
-    return { soc: 'hisilicon', marker: 'HISI eMMC map 0x1630/0x5840 @0', tableType: 'hisi_emmc_map' };
-  }
-  const mptOff = findAmlMpt(bytes, fileSize);
-  if (mptOff >= 0) {
-    return { soc: 'amlogic', marker: `Amlogic MPT @0x${mptOff.toString(16)}`, tableType: 'aml_mpt' };
-  }
-  const blkOff = findBlkdevpartsMmc(bytes, fileSize);
-  if (blkOff >= 0) {
-    return { soc: 'linux', marker: `blkdevparts=mmcblk0 @0x${blkOff.toString(16)}`, tableType: 'blkdevparts_mmc' };
-  }
+  const registered = detectRegisteredFormat(bytes, fileSize);
+  if (registered) return registered;
   return { soc: 'unknown', marker: 'No signature found', tableType: 'none' };
 }
 
@@ -289,13 +66,6 @@ export function detectFilesystem(bytes, offset) {
     if (m2 === 0x1985 || m2 === 0x8519) return 'jffs2';
   }
   return 'raw';
-}
-
-function validRange(off, sz, fileSize) {
-  if (sz === 0 || sz > 0x1000000000) return false;
-  if (off > 0x1000000000) return false;
-  if (fileSize && off + sz > fileSize + SECTOR) return false;
-  return true;
 }
 
 // Amlogic AMLS MBR: magic "AMLS" @0, version@4, entry_count@8, entries @0x10.
@@ -461,9 +231,11 @@ export function analyzeUserArea(bytes, fileSize) {
     case 'nvtk': parts = parseNovatekHeader(bytes, fileSize); break;
     case 'fastboot': parts = parseHisiliconFastboot(bytes, fileSize); break;
     case 'uboot_env': parts = parseRealtek(bytes); break;
-    case 'hisi_emmc_map': parts = parseHisiEmmcMap(bytes, fileSize); break;
-    case 'aml_mpt': parts = parseAmlogicMpt(bytes, fileSize); break;
-    case 'blkdevparts_mmc': parts = parseBlkdevpartsMmc(bytes, fileSize); break;
+    case 'hisi_emmc_map':
+    case 'aml_mpt':
+    case 'blkdevparts_mmc':
+      parts = parseRegisteredFormat(det.tableType, bytes, fileSize);
+      break;
     default: parts = [];
   }
   for (const p of parts) {

@@ -19,6 +19,7 @@
   },
   "scripts": {
     "dev": "vite",
+    "test": "node --test tests/hisiEmmcMap.test.js tests/amlMpt.test.js tests/blkdevpartsMmc.test.js tests/userAreaRegistry.test.js",
     "build": "vite build",
     "electron": "electron .",
     "electron:build": "npm run build && electron-builder --win portable",
