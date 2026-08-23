@@ -15,6 +15,7 @@ import UserAreaAnalysis from '@/components/emmc/UserAreaAnalysis';
 import FilesystemDetections from '@/components/emmc/FilesystemDetections';
 import { formatBytes } from '@/lib/binaryUtils';
 import { isExt4 } from '@/lib/ext4';
+import { createFileRangeReader } from '@/lib/rangeReader';
 import { scanFilesystems } from '@/lib/detectFilesystems';
 import { crc32Init, crc32Update, crc32Final } from '@/lib/crc32';
 import { toast } from '@/components/ui/use-toast';
@@ -22,7 +23,6 @@ import { Progress } from '@/components/ui/progress';
 
 const GPT_CHUNK = 128 * 1024 * 1024; // initial read for GPT parsing + hw partition detection
 const TAIL_CHUNK = 4 * 1024 * 1024; // tail read for ZIP central directory / EOCD
-const EXPLORE_LIMIT = 1024 * 1024 * 1024; // 1 GB max for in-memory ext4 explore
 
 export default function EmmcTool() {
   const [file1, setFile1] = useState(null);
@@ -33,6 +33,7 @@ export default function EmmcTool() {
   const [log, setLog] = useState([]);
   const [explorePart, setExplorePart] = useState(null);
   const [exploreBytes, setExploreBytes] = useState(null);
+  const [exploreReader, setExploreReader] = useState(null);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(null); // { label, percent } | null
   const [selected, setSelected] = useState(new Set());
@@ -93,6 +94,7 @@ export default function EmmcTool() {
     setReplacements({});
     setExplorePart(null);
     setExploreBytes(null);
+    setExploreReader(null);
     setBusy(true);
     setProgress({ label: `Reading ${f.name}…`, percent: 0 });
     try {
@@ -130,6 +132,7 @@ export default function EmmcTool() {
     setLog([]);
     setExplorePart(null);
     setExploreBytes(null);
+    setExploreReader(null);
     setBusy(false);
     setProgress(null);
     setSelected(new Set());
@@ -139,6 +142,7 @@ export default function EmmcTool() {
     setReplacements({});
     setExplorePart(null);
     setExploreBytes(null);
+    setExploreReader(null);
     addLog('Reverted all changes');
   };
 
@@ -348,37 +352,40 @@ export default function EmmcTool() {
   };
 
   const explore = async (p) => {
-    let bytes;
     if (replacements[p.name]) {
-      bytes = replacements[p.name];
-    } else {
-      if (p.size > EXPLORE_LIMIT) {
-        toast({ variant: 'destructive', title: 'Partition too large', description: `${formatBytes(p.size)} — explore supports partitions up to 1 GB.` });
+      setExploreReader(null);
+      setExploreBytes(replacements[p.name]);
+      setExplorePart(p);
+      addLog(`Exploring partition "${p.name}" (${formatBytes(p.size)})`);
+      return;
+    }
+    setBusy(true);
+    try {
+      const rdr = createFileRangeReader(file1, p.startByte, p.size);
+      const head = await rdr.read(0, Math.min(2048, p.size));
+      if (!isExt4(head)) {
+        toast({ variant: 'destructive', title: 'Explore failed', description: `"${p.name}" does not look like ext4.` });
         return;
       }
-      setBusy(true);
-      try {
-        bytes = new Uint8Array(await file1.slice(p.startByte, p.startByte + p.size).arrayBuffer());
-      } catch (e) {
-        toast({ variant: 'destructive', title: 'Explore failed', description: e.message });
-        setBusy(false);
-        return;
-      }
+      setExploreBytes(null);
+      setExploreReader(rdr);
+      setExplorePart(p);
+      addLog(`Exploring partition "${p.name}" (${formatBytes(p.size)}) via ranged reads`);
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Explore failed', description: e.message });
+    } finally {
       setBusy(false);
     }
-    setExplorePart(p);
-    setExploreBytes(bytes);
-    addLog(`Exploring partition "${p.name}" (${formatBytes(bytes.length)})`);
   };
 
   // Explore mode: show Ext4Browser for the selected partition
-  if (explorePart && exploreBytes) {
+  if (explorePart && (exploreBytes || exploreReader)) {
     return (
       <div className="min-h-screen bg-background text-foreground">
         <header className="border-b border-border bg-card/50 backdrop-blur sticky top-0 z-10">
           <div className="max-w-6xl mx-auto px-5 py-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <button type="button" onClick={() => { setExplorePart(null); setExploreBytes(null); }} className="text-muted-foreground hover:text-foreground" aria-label="Back to partition table"><ArrowLeft className="w-4 h-4" /></button>
+              <button type="button" onClick={() => { setExplorePart(null); setExploreBytes(null); setExploreReader(null); }} className="text-muted-foreground hover:text-foreground" aria-label="Back to partition table"><ArrowLeft className="w-4 h-4" /></button>
               <div className="w-9 h-9 rounded-lg bg-sky-600 flex items-center justify-center"><HardDrive className="w-5 h-5 text-white" /></div>
               <div>
                 <h1 className="text-base font-semibold tracking-tight">Explore: {explorePart.name}</h1>
@@ -396,10 +403,12 @@ export default function EmmcTool() {
           <div className="rounded-xl border border-border bg-card p-3">
             <Ext4Browser
               bytes={exploreBytes}
+              reader={exploreReader}
               dirty={dirty}
               onPatched={(patched) => {
                 setReplacements((prev) => ({ ...prev, [explorePart.name]: patched }));
                 setExploreBytes(patched);
+                setExploreReader(null);
                 addLog(`Patched ext4 in "${explorePart.name}"`);
               }}
               onDownload={downloadDump}

@@ -24,6 +24,7 @@ const detectImageType = (raw) => {
   return null;
 };
 import { isExt4, parseSuperblock, listFiles, readFileBytes, patchFile, getAllocatedSpace, getFreeSpace, growAndPatchFile, deleteFile, createFile } from '@/lib/ext4';
+import { parseSuperblockRange, listFilesRange, readFileBytesRange, getFreeSpaceRange } from '@/lib/ext4Range';
 import { createZip } from '@/lib/zipWriter';
 import { formatBytes } from '@/lib/binaryUtils';
 import HexViewer from '@/components/tv/HexViewer';
@@ -109,11 +110,50 @@ function TreeNode({ node, depth, expanded, toggle, selected, onSelect, onAddFile
   );
 }
 
-export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dirty }) {
-  const sb = useMemo(() => (isExt4(bytes) ? parseSuperblock(bytes) : null), [bytes]);
-  const files = useMemo(() => (sb ? listFiles(bytes, sb) : []), [bytes, sb]);
+export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onReset, dirty }) {
+  const writable = !!bytes;
+  const [rangeMeta, setRangeMeta] = useState(null);
+  const [rangeErr, setRangeErr] = useState(null);
+  const [rangeLoading, setRangeLoading] = useState(false);
+
+  useEffect(() => {
+    if (bytes || !reader) {
+      setRangeMeta(null);
+      setRangeErr(null);
+      setRangeLoading(false);
+      return undefined;
+    }
+    let cancelled = false;
+    setRangeLoading(true);
+    (async () => {
+      try {
+        const parsed = await parseSuperblockRange(reader);
+        if (!parsed) throw new Error('This image is not an ext4 filesystem (no ext4 superblock magic found).');
+        const listed = await listFilesRange(reader, parsed);
+        const free = await getFreeSpaceRange(reader, parsed);
+        if (!cancelled) {
+          setRangeMeta({ sb: parsed, files: listed, freeSpace: free });
+          setRangeErr(null);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setRangeMeta(null);
+          setRangeErr(e.message || String(e));
+        }
+      } finally {
+        if (!cancelled) setRangeLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [reader, bytes]);
+
+  const memSb = useMemo(() => (bytes && isExt4(bytes) ? parseSuperblock(bytes) : null), [bytes]);
+  const memFiles = useMemo(() => (bytes && memSb ? listFiles(bytes, memSb) : []), [bytes, memSb]);
+  const memFree = useMemo(() => (bytes && memSb ? getFreeSpace(bytes, memSb) : 0), [bytes, memSb]);
+  const sb = bytes ? memSb : rangeMeta?.sb;
+  const files = bytes ? memFiles : (rangeMeta?.files || []);
+  const freeSpace = bytes ? memFree : (rangeMeta?.freeSpace || 0);
   const tree = useMemo(() => buildTree(files), [files]);
-  const freeSpace = useMemo(() => (sb ? getFreeSpace(bytes, sb) : 0), [bytes, sb]);
   const [expanded, setExpanded] = useState({ '/': true });
   const [selected, setSelected] = useState(null);
   const [selectedFolder, setSelectedFolder] = useState('');
@@ -135,44 +175,79 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
   const addFileInputRef = useRef(null);
   const addTargetFolder = useRef('');
 
+  const loadFileBytes = async (inodeNum) => {
+    if (bytes) return readFileBytes(bytes, inodeNum, sb);
+    return readFileBytesRange(reader, inodeNum, sb);
+  };
+
   useEffect(() => {
     setImgDirty(false);
     setImgError(false);
-    if (selected) {
-      const raw = readFileBytes(bytes, selected.inode, sb);
-      if (isImage(selected.path)) {
-        const detected = detectImageType(raw);
-        if (detected) {
-          const mime = detected === 'jpeg' ? 'image/jpeg' : detected === 'png' ? 'image/png' : detected === 'bmp' ? 'image/bmp' : detected === 'gif' ? 'image/gif' : 'image/webp';
-          const blob = new Blob([raw], { type: mime });
-          setImgUrl(URL.createObjectURL(blob));
-          setImgValid(true);
+    let cancelled = false;
+    const run = async () => {
+      if (selected) {
+        const raw = await loadFileBytes(selected.inode);
+        if (cancelled) return;
+        if (isImage(selected.path)) {
+          const detected = detectImageType(raw);
+          if (detected) {
+            const mime = detected === 'jpeg' ? 'image/jpeg' : detected === 'png' ? 'image/png' : detected === 'bmp' ? 'image/bmp' : detected === 'gif' ? 'image/gif' : 'image/webp';
+            const blob = new Blob([raw], { type: mime });
+            setImgUrl(URL.createObjectURL(blob));
+            setImgValid(true);
+          } else {
+            setImgValid(false);
+            setImgUrl(null);
+          }
+          setContent('');
+          setOrigContent('');
         } else {
-          setImgValid(false);
-          setImgUrl(null);
+          const bin = isBinaryFile(selected.path, raw);
+          setIsBinary(bin);
+          if (bin) {
+            setRawBytes(raw);
+            setContent(''); setOrigContent('');
+          } else {
+            setRawBytes(null);
+            setContent(new TextDecoder('utf-8', { fatal: false }).decode(raw));
+            setOrigContent(new TextDecoder('utf-8', { fatal: false }).decode(raw));
+          }
         }
+        setError('');
+      } else {
         setContent('');
         setOrigContent('');
-      } else {
-        const bin = isBinaryFile(selected.path, raw);
-        setIsBinary(bin);
-        if (bin) {
-          setRawBytes(raw);
-          setContent(''); setOrigContent('');
-        } else {
-          setRawBytes(null);
-          setContent(new TextDecoder('utf-8', { fatal: false }).decode(raw));
-          setOrigContent(new TextDecoder('utf-8', { fatal: false }).decode(raw));
-        }
+        setImgUrl(null);
       }
-      setError('');
-    } else { setContent(''); setOrigContent(''); setImgUrl(null); }
-    return () => { if (imgUrl) URL.revokeObjectURL(imgUrl); };
-  }, [selected, bytes, sb]);
+    };
+    run();
+    return () => {
+      cancelled = true;
+      if (imgUrl) URL.revokeObjectURL(imgUrl);
+    };
+  }, [selected, bytes, sb, reader]);
 
+  if (!bytes && rangeLoading) {
+    return <p className="text-sm text-muted-foreground p-4">Reading ext4 metadata…</p>;
+  }
+  if (!bytes && rangeErr) {
+    return <p className="text-sm text-rose-500 p-4">{rangeErr}</p>;
+  }
   if (!sb) return <p className="text-sm text-muted-foreground p-4">This image is not an ext4 filesystem (no ext4 superblock magic found).</p>;
 
-  const allocSpace = selected ? getAllocatedSpace(bytes, selected.inode, sb) : 0;
+  const allocSpace = selected
+    ? (bytes ? getAllocatedSpace(bytes, selected.inode, sb) : (selected.allocated || selected.size || 0))
+    : 0;
+
+  const requireWritable = () => {
+    if (writable) return true;
+    toast({
+      variant: 'destructive',
+      title: 'Read-only explore',
+      description: 'In-place edit, replace, delete, and add are unavailable for range-backed partitions. Viewing and extract still work.',
+    });
+    return false;
+  };
 
   const toggle = (p) => setExpanded((e) => ({ ...e, [p]: !e[p] }));
   const regular = files.filter((f) => !f.isDir);
@@ -182,6 +257,7 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
     : regular;
 
   const save = () => {
+    if (!requireWritable()) return;
     setError('');
     try {
       const next = new Uint8Array(bytes);
@@ -196,6 +272,7 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
   const dirtyFile = content !== origContent;
 
   const editByteInFile = (index, value) => {
+    if (!requireWritable()) return;
     const raw = readFileBytes(bytes, selected.inode, sb);
     raw[index] = value & 0xff;
     const next = new Uint8Array(bytes);
@@ -205,8 +282,8 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
     setImgDirty(true);
   };
 
-  const exportFile = () => {
-    const raw = readFileBytes(bytes, selected.inode, sb);
+  const exportFile = async () => {
+    const raw = await loadFileBytes(selected.inode);
     const blob = new Blob([raw], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -217,6 +294,7 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
   };
 
   const replaceFile = (file) => {
+    if (!requireWritable()) return;
     setError('');
     const reader = new FileReader();
     reader.onload = () => {
@@ -244,6 +322,7 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
   };
 
   const deleteSelected = () => {
+    if (!requireWritable()) return;
     if (!window.confirm(`Delete "${selected.path}" from the ext4 partition? This reclaims its data blocks.`)) return;
     setError('');
     try {
@@ -265,6 +344,7 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
   };
 
   const addFile = (file) => {
+    if (!requireWritable()) return;
     setError('');
     const reader = new FileReader();
     reader.onload = () => {
@@ -286,10 +366,13 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
 
   const extractAll = async () => {
     setExtracting(true);
-    const allFiles = scopedRegular.map((f) => ({
-      relPath: f.path.replace(/^\//, ''),
-      data: readFileBytes(bytes, f.inode, sb),
-    }));
+    const allFiles = [];
+    for (const f of scopedRegular) {
+      allFiles.push({
+        relPath: f.path.replace(/^\//, ''),
+        data: await loadFileBytes(f.inode),
+      });
+    }
     if (!allFiles.length) {
       toast({ variant: 'destructive', title: 'Nothing to extract', description: selectedFolder ? `No files found under "${selectedFolder}"` : 'No files in this partition' });
       setExtracting(false);
@@ -358,6 +441,7 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
   };
 
   const replaceFromFolder = async (fileList) => {
+    if (!requireWritable()) return;
     setBulkBusy(true);
     let next = new Uint8Array(bytes);
     let replaced = 0;
@@ -406,19 +490,22 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
             <button onClick={exportFile} className="flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent px-3 py-1.5 font-medium transition-colors">
               <Download className="w-3.5 h-3.5" /> Save
             </button>
-            <button onClick={() => replaceInputRef.current?.click()} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white px-3 py-1.5 font-medium transition-colors">
+            <button disabled={!writable} onClick={() => replaceInputRef.current?.click()} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-3 py-1.5 font-medium transition-colors">
               <Upload className="w-3.5 h-3.5" /> Replace
             </button>
-            <button onClick={deleteSelected} className="flex items-center gap-1.5 text-xs rounded-md bg-rose-600 hover:bg-rose-500 text-white px-3 py-1.5 font-medium transition-colors">
+            <button disabled={!writable} onClick={deleteSelected} className="flex items-center gap-1.5 text-xs rounded-md bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white px-3 py-1.5 font-medium transition-colors">
               <Trash2 className="w-3.5 h-3.5" /> Delete
             </button>
             {!isImage(selected.path) && !isBinary && (
-              <button onClick={save} disabled={!dirtyFile} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-3 py-1.5 font-medium transition-colors">
+              <button onClick={save} disabled={!writable || !dirtyFile} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-3 py-1.5 font-medium transition-colors">
                 <Save className="w-3.5 h-3.5" /> Save in-place
               </button>
             )}
           </div>
         </div>
+        {!writable && (
+          <p className="text-[11px] text-amber-600 mb-2">Read-only explore (range I/O). Extract and view work; in-place edit is disabled so the partition is not loaded into memory.</p>
+        )}
         <input ref={replaceInputRef} type="file" className="hidden" accept={isImage(selected.path) ? 'image/*,.bmp' : '*/*'} onChange={(e) => { const f = e.target.files?.[0]; if (f) replaceFile(f); e.target.value = ''; }} />
         {isImage(selected.path) ? (
           <div className="flex flex-col items-center justify-center bg-muted/30 rounded-md border border-input p-4 min-h-[360px]">
@@ -430,7 +517,7 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
           </div>
         ) : isBinary ? (
           <div className="rounded-md border border-input bg-background min-h-[360px] overflow-hidden">
-            <HexViewer bytes={rawBytes} onEditByte={editByteInFile} />
+            <HexViewer bytes={rawBytes} onEditByte={writable ? editByteInFile : () => {}} />
           </div>
         ) : (
           <textarea value={content} onChange={(e) => setContent(e.target.value)} spellCheck={false}
@@ -454,6 +541,12 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
 
   return (
     <div>
+      {!writable && (
+        <p className="text-[11px] text-amber-600 mb-2">
+          Read-only explore via ranged reads — this partition is not loaded into memory.
+          Extract works; replace/add/edit require an in-memory copy (for example after Replace in the partition table).
+        </p>
+      )}
       <div className="flex flex-wrap items-center gap-2 mb-3 min-w-0">
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <HardDrive className="w-3.5 h-3.5" /> {sb.blockSize} B · {regular.length} files · {dirCount} dirs
@@ -472,10 +565,10 @@ export default function Ext4Browser({ bytes, onPatched, onDownload, onReset, dir
           <button onClick={extractAll} disabled={extracting} className="flex items-center gap-1.5 text-xs rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white px-2.5 py-1.5 font-medium transition-colors">
             <Archive className="w-3.5 h-3.5" /> {extracting ? 'Extracting…' : (selectedFolder ? 'Extract selected' : 'Extract all')}
           </button>
-          <button onClick={() => folderInputRef.current?.click()} disabled={bulkBusy} className="flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-40 px-2.5 py-1.5 font-medium transition-colors">
+          <button onClick={() => folderInputRef.current?.click()} disabled={!writable || bulkBusy} className="flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-40 px-2.5 py-1.5 font-medium transition-colors">
             <FolderInput className="w-3.5 h-3.5" /> {bulkBusy ? 'Replacing…' : (selectedFolder ? 'Replace selected' : 'Replace all')}
           </button>
-          <button onClick={() => handleAddFile(selectedFolder)} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 text-white px-2.5 py-1.5 font-medium transition-colors max-w-[260px]"><FilePlus className="w-3.5 h-3.5 shrink-0" /> <span className="truncate">Add file to {selectedFolder || '/'}</span></button>
+          <button disabled={!writable} onClick={() => handleAddFile(selectedFolder)} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-2.5 py-1.5 font-medium transition-colors max-w-[260px]"><FilePlus className="w-3.5 h-3.5 shrink-0" /> <span className="truncate">Add file to {selectedFolder || '/'}</span></button>
           <button onClick={() => setExpanded({ '/': true })} className="text-xs rounded-md border border-border hover:bg-accent px-2.5 py-1.5">Collapse all</button>
           <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter files…"
             className="rounded-md border border-input bg-background px-2.5 py-1.5 text-xs outline-none focus:ring-2 focus:ring-emerald-500/40 w-36 max-w-full" />
