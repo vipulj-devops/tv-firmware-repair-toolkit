@@ -24,11 +24,12 @@ function w16(buf, off, val) {
 }
 
 describe('user-area strict format registry', () => {
-  it('keeps emmc_1630_5840 before aml_mpt before blkdevparts_mmc', () => {
+  it('keeps emmc_1630_5840 before aml_mpt before blkdevparts_mmc before mtdparts_emmc', () => {
     assert.deepEqual(USER_AREA_STRICT_FORMATS.map((f) => f.id), [
       'emmc_1630_5840',
       'aml_mpt',
       'blkdevparts_mmc',
+      'mtdparts_emmc',
     ]);
   });
 

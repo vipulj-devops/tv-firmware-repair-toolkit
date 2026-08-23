@@ -2,7 +2,7 @@
 // Detects the SoC / partition-table format from the USER AREA only (no boot0/boot1)
 // and parses vendor-specific tables: Amlogic AMLS MBR, Amlogic MPT (not AMLS), MStar header, Novatek NVTK,
 // HiSilicon fastboot, vendor-neutral eMMC 0x1630/0x5840 map, Linux/U-Boot blkdevparts=mmcblk0:, Realtek U-Boot
-// env (mtdparts). Also detects the filesystem type of each parsed partition (ext4,
+// env (mtdparts), vendor-neutral U-Boot mtdparts= on eMMC. Also detects the filesystem type of each parsed partition (ext4,
 // f2fs, Android boot, squashfs, sparse, UBIFS, JFFS2, raw). Standard GPT/MBR are
 // detected here but parsed by emmc.js.
 
@@ -13,6 +13,7 @@ import { detectRegisteredFormat, parseRegisteredFormat } from './userArea/regist
 export { isEmmc1630Map, isHisiEmmcMap } from './userArea/formats/emmc1630Map.js';
 export { findAmlMpt, isAmlMpt } from './userArea/formats/amlMpt.js';
 export { findBlkdevpartsMmc, isBlkdevpartsMmc } from './userArea/formats/blkdevpartsMmc.js';
+export { findMtdpartsEmmc, isMtdpartsEmmc } from './userArea/formats/mtdpartsEmmc.js';
 
 function parseSize(s) {
   s = String(s).trim();
@@ -265,6 +266,7 @@ export function analyzeUserArea(bytes, fileSize) {
     case 'emmc_1630_5840':
     case 'aml_mpt':
     case 'blkdevparts_mmc':
+    case 'mtdparts_emmc':
       parts = parseRegisteredFormat(det.tableType, bytes, fileSize);
       break;
     default: parts = [];

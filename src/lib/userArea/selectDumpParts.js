@@ -1,6 +1,6 @@
 import { userAreaToParts } from '../userAreaParser.js';
 
-export const STRICT_USER_AREA_TYPES = ['emmc_1630_5840', 'aml_mpt', 'blkdevparts_mmc'];
+export const STRICT_USER_AREA_TYPES = ['emmc_1630_5840', 'aml_mpt', 'blkdevparts_mmc', 'mtdparts_emmc'];
 
 const STRICT = new Set(STRICT_USER_AREA_TYPES);
 

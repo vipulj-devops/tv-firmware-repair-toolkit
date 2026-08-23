@@ -216,3 +216,44 @@ describe('selectDumpParts', () => {
     assert.equal(selected[0].ptType, 'mbr');
   });
 });
+
+describe('detection precedence: mtdparts_emmc', () => {
+  const MTD_SIZE = 8 * 1024 * 1024;
+  const mtdSpec = Buffer.from('mtdparts=vendor-emmc:1M(boot),-(data)', 'latin1');
+
+  it('still classifies GPT as gpt when mtdparts is also present', () => {
+    const bytes = new Uint8Array(4096);
+    bytes.set(gptBuffer(), 0);
+    bytes.set(mtdSpec, 2048);
+    assert.equal(detectSocUserArea(bytes, MTD_SIZE).tableType, 'gpt');
+    assert.equal(hasGpt(bytes), true);
+  });
+
+  it('still classifies existing 0x1630, MPT, and blkdevparts fixtures ahead of mtdparts', () => {
+    assert.equal(detectSocUserArea(hisiFixture, HISI_SIZE).tableType, 'emmc_1630_5840');
+    assert.equal(detectSocUserArea(mptFixture, ROM1_SIZE).tableType, 'aml_mpt');
+    assert.equal(detectSocUserArea(blkFixture, BLK_SIZE).tableType, 'blkdevparts_mmc');
+  });
+
+  it('prefers blkdevparts_mmc when both blkdevparts and mtdparts are present', () => {
+    const bytes = new Uint8Array(blkFixture.length + 4 + mtdSpec.length);
+    bytes.set(blkFixture, 0);
+    bytes.set(mtdSpec, blkFixture.length + 1);
+    assert.equal(detectSocUserArea(bytes, BLK_SIZE).tableType, 'blkdevparts_mmc');
+  });
+
+  it('prefers mtdparts_emmc over a usable primary MBR', () => {
+    const bytes = placeAfterMbr(mtdSpec);
+    assert.equal(parseMbr(bytes, 0).length, 1);
+    assert.equal(detectSocUserArea(bytes, MTD_SIZE).tableType, 'mtdparts_emmc');
+    const ua = analyzeUserArea(bytes, MTD_SIZE);
+    const selected = selectDumpParts({
+      hasGpt: false,
+      gptParts: autoMapPartitions(bytes, MTD_SIZE),
+      userAreaAnalysis: ua,
+      firmwareParts: [],
+    });
+    assert.equal(selected[0].ptType, 'mtdparts_emmc');
+    assert.equal(selected.length, 2);
+  });
+});
