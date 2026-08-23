@@ -124,6 +124,7 @@ describe('mtdparts_emmc (U-Boot mtdparts on eMMC)', () => {
   it('parses the Sony env fixture: 63 partitions, boot at 13 MiB, unused 132 MiB tail', () => {
     const det = detectSocUserArea(fixture, SONY_SIZE);
     assert.equal(det.tableType, 'mtdparts_emmc');
+    assert.notEqual(det.tableType, 'mbr');
     const analysis = analyzeUserArea(fixture, SONY_SIZE);
     assert.equal(analysis.partitions.length, 63);
     const byName = Object.fromEntries(analysis.partitions.map((p) => [p.name, p]));

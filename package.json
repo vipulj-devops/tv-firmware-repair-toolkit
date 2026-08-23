@@ -19,7 +19,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "test": "node --test tests/emmc1630Map.test.js tests/amlMpt.test.js tests/blkdevpartsMmc.test.js tests/userAreaRegistry.test.js tests/detectionPrecedence.test.js tests/mtdpartsEmmc.test.js",
+    "test": "node --test tests/emmc1630Map.test.js tests/amlMpt.test.js tests/blkdevpartsMmc.test.js tests/userAreaRegistry.test.js tests/detectionPrecedence.test.js tests/mtdpartsEmmc.test.js tests/firmwareFamily.test.js",
     "build": "vite build",
     "electron": "electron .",
     "electron:build": "npm run build && electron-builder --win portable",

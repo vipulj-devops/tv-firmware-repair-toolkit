@@ -35,7 +35,7 @@ export default function UserAreaAnalysis({ analysis }) {
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
         <Cell label="SoC / vendor" value={soc} />
-        <Cell label="Partition table" value={tableType === 'emmc_1630_5840' ? 'eMMC 0x1630/0x5840 Map' : tableType === 'aml_mpt' ? 'Amlogic MPT' : tableType === 'blkdevparts_mmc' ? 'blkdevparts' : tableType} />
+        <Cell label="Partition table" value={tableType === 'emmc_1630_5840' ? 'eMMC 0x1630/0x5840 Map' : tableType === 'aml_mpt' ? 'Amlogic MPT' : tableType === 'blkdevparts_mmc' ? 'blkdevparts' : tableType === 'mtdparts_emmc' ? 'mtdparts' : tableType} />
         <Cell label="Detection marker" value={marker} />
       </div>
       {bootParts.length > 0 && (

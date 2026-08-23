@@ -6,6 +6,12 @@
 // deep text scan for embedded scatter/mtdparts scripts.
 
 const TEXT_SCAN_CAP = 2 * 1024 * 1024; // scan up to 2 MB of loaded chunk for text scripts
+// Strong vendor IDs (e.g. RTD284X_DEMO) can sit past the 2 MB script window.
+const STRONG_SCAN_CAP = 40 * 1024 * 1024;
+
+const TIER_STRONG = 3;
+const TIER_MEDIUM = 2;
+const TIER_WEAK = 1;
 
 // ---------- low-level helpers ----------
 
@@ -372,6 +378,154 @@ function parseMstarBin(bytes) {
 }
 
 // ---------- family detection ----------
+// Text markers are token-bounded and scored by evidence tier. Candidates are
+// collected first; stronger evidence beats weaker evidence regardless of
+// family-list order. Weak 3-letter tokens (RTD, HISI) never win from a
+// substring inside a larger identifier (e.g. WTrtdI, LGEK, aMLK).
+
+function isTokenChar(ch) {
+  if (!ch) return false;
+  const c = ch.charCodeAt(0);
+  return (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || c === 95;
+}
+
+function isPrefixMarker(marker, prefixFlag) {
+  if (prefixFlag) return true;
+  return marker.endsWith('-') || marker.endsWith('_');
+}
+
+function findBoundedMarker(source, marker, from = 0, prefixFlag = false) {
+  const prefix = isPrefixMarker(marker, prefixFlag);
+  let i = from;
+  while (i <= source.length - marker.length) {
+    const at = source.indexOf(marker, i);
+    if (at < 0) return -1;
+    const leftOk = at === 0 || !isTokenChar(source[at - 1]);
+    const after = at + marker.length;
+    const rightOk = prefix || after >= source.length || !isTokenChar(source[after]);
+    if (leftOk && rightOk) return at;
+    i = at + 1;
+  }
+  return -1;
+}
+
+function collectMarkerHits(source, marker, family, tier, evidence, prefixFlag = false) {
+  let from = 0;
+  while (from <= source.length - marker.length) {
+    const at = findBoundedMarker(source, marker, from, prefixFlag);
+    if (at < 0) break;
+    evidence.push({ family, marker, tier, offset: at });
+    from = at + marker.length;
+  }
+}
+
+function collectRtdSocHits(source, evidence) {
+  const re = /RTD\d{3,4}[A-Z0-9_]*/g;
+  let m;
+  while ((m = re.exec(source))) {
+    const at = m.index;
+    const token = m[0];
+    const leftOk = at === 0 || !isTokenChar(source[at - 1]);
+    const after = at + token.length;
+    const rightOk = after >= source.length || !isTokenChar(source[after]);
+    if (leftOk && rightOk) {
+      evidence.push({ family: 'Realtek', marker: token, tier: TIER_STRONG, offset: at });
+    }
+    if (re.lastIndex === at) re.lastIndex += 1;
+  }
+}
+
+const FAMILY_TEXT_MARKERS = [
+  {
+    name: 'Amlogic',
+    markers: [
+      { text: 'AMLOGIC', tier: TIER_STRONG },
+      { text: 'AMLBOOT', tier: TIER_STRONG },
+      { text: 'UBOOT AML', tier: TIER_STRONG },
+      { text: 'AML-', tier: TIER_MEDIUM },
+      { text: 'AML_', tier: TIER_MEDIUM },
+    ],
+  },
+  {
+    name: 'MediaTek',
+    markers: [
+      { text: 'MEDIATEK', tier: TIER_STRONG },
+      { text: 'BRLYT', tier: TIER_STRONG },
+      { text: 'MTKBOOT', tier: TIER_STRONG },
+      { text: 'MTK BOOT', tier: TIER_STRONG },
+      { text: 'MTK-', tier: TIER_MEDIUM },
+    ],
+  },
+  {
+    name: 'MStar',
+    markers: [
+      { text: 'MSTAR', tier: TIER_STRONG },
+      { text: 'MBOOT', tier: TIER_STRONG },
+      { text: 'MST SEMICONDUCTORS', tier: TIER_STRONG },
+    ],
+  },
+  {
+    name: 'HiSilicon',
+    markers: [
+      { text: 'HI379', tier: TIER_STRONG, prefix: true },
+      { text: 'HI371', tier: TIER_STRONG, prefix: true },
+      { text: 'HISILICON', tier: TIER_MEDIUM },
+      { text: 'HISI', tier: TIER_WEAK },
+    ],
+  },
+  {
+    name: 'Realtek',
+    markers: [
+      { text: 'REALTEK', tier: TIER_STRONG },
+      { text: 'RTK-', tier: TIER_MEDIUM },
+      { text: 'RTD', tier: TIER_WEAK },
+    ],
+  },
+  {
+    name: 'LG',
+    markers: [
+      { text: 'LG ELECTRONICS', tier: TIER_STRONG },
+      { text: 'WEBOS', tier: TIER_STRONG },
+    ],
+  },
+  {
+    name: 'Samsung',
+    markers: [
+      { text: 'SAMSUNG', tier: TIER_STRONG },
+      { text: 'TIZEN', tier: TIER_STRONG },
+      { text: 'SECURO', tier: TIER_STRONG },
+    ],
+  },
+  {
+    name: 'Novatek',
+    markers: [
+      { text: 'NOVATEK', tier: TIER_STRONG },
+      { text: 'NT726', tier: TIER_MEDIUM },
+      { text: 'NT73', tier: TIER_MEDIUM },
+      { text: 'NT72', tier: TIER_WEAK },
+    ],
+  },
+];
+
+const UNKNOWN_FAMILY = { family: 'Generic / unknown', marker: 'No vendor signature found' };
+
+function pickFamilyEvidence(evidence) {
+  if (!evidence.length) return UNKNOWN_FAMILY;
+  let best = evidence[0];
+  for (let i = 1; i < evidence.length; i++) {
+    const e = evidence[i];
+    if (e.tier > best.tier) {
+      best = e;
+    } else if (e.tier === best.tier) {
+      if (e.offset < best.offset) best = e;
+      else if (e.offset === best.offset && e.marker.length > best.marker.length) best = e;
+    }
+  }
+  // Weak 3-letter hits are not enough to name a vendor, except bounded RTD as
+  // a Realtek fallback when nothing stronger is present.
+  if (best.tier === TIER_WEAK && best.family !== 'Realtek') return UNKNOWN_FAMILY;
+  return { family: best.family, marker: `text: ${best.marker}` };
+}
 
 function detectFamily(bytes, fileName, tailBytes) {
   const fn = fileName.toUpperCase();
@@ -387,24 +541,35 @@ function detectFamily(bytes, fileName, tailBytes) {
   }
   // MStar upgrade .bin: 16 KB U-Boot script header padded with 0xFF
   if (isMstarBin(bytes)) return { family: 'MStar', marker: 'U-Boot script header (16KB .bin)' };
-  // text-based marker scan
-  const text = scanText(bytes);
-  const source = `${fn}\n${text}`.toUpperCase();
-  const families = [
-    { name: 'Amlogic', markers: ['AMLOGIC', 'AML-', 'AMLBOOT', 'UBOOT AML', 'AML_'] },
-    { name: 'MediaTek', markers: ['MEDIATEK', 'MTK-', 'BRLYT', 'MTKBOOT', 'MTK BOOT'] },
-    { name: 'MStar', markers: ['MSTAR', 'MBOOT', 'MST SEMICONDUCTORS'] },
-    { name: 'HiSilicon', markers: ['HISILICON', 'HISI', 'HI379', 'HI371'] },
-    { name: 'Realtek', markers: ['REALTEK', 'RTK-', 'RTD'] },
-    { name: 'LG', markers: ['LGE', 'LG ELECTRONICS', 'WEBOS', 'EPK'] },
-    { name: 'Samsung', markers: ['SAMSUNG', 'TIZEN', 'SECURO'] },
-    { name: 'Novatek', markers: ['NOVATEK', 'NT72', 'NT73', 'NT726'] },
-  ];
-  for (const f of families) {
-    const m = f.markers.find((mk) => source.includes(mk));
-    if (m) return { family: f.name, marker: `text: ${m}` };
+
+  const textNear = scanText(bytes);
+  const sourceNear = `${fn}\n${textNear}`.toUpperCase();
+  const evidence = [];
+  for (const family of FAMILY_TEXT_MARKERS) {
+    for (const mk of family.markers) {
+      collectMarkerHits(sourceNear, mk.text, family.name, mk.tier, evidence, mk.prefix);
+    }
   }
-  return { family: 'Generic / unknown', marker: 'No vendor signature found' };
+
+  const strongLen = Math.min(bytes.length, STRONG_SCAN_CAP);
+  if (strongLen > TEXT_SCAN_CAP) {
+    // Extended window is for Realtek SoC/board IDs that live past the 2 MB
+    // script scan (e.g. RTD284X_DEMO). Other families stay on the 2 MB window
+    // so later toolchain/license strings (V7A-MEDIATEK-LINUX, MEDIATEK SOFTWARE)
+    // cannot override a dump that has no near-window vendor evidence.
+    const textStrong = new TextDecoder('latin1').decode(bytes.subarray(0, strongLen));
+    const sourceStrong = `${fn}\n${textStrong}`.toUpperCase();
+    const realtek = FAMILY_TEXT_MARKERS.find((f) => f.name === 'Realtek');
+    for (const mk of realtek.markers) {
+      if (mk.tier !== TIER_STRONG) continue;
+      collectMarkerHits(sourceStrong, mk.text, realtek.name, mk.tier, evidence, mk.prefix);
+    }
+    collectRtdSocHits(sourceStrong, evidence);
+  } else {
+    collectRtdSocHits(sourceNear, evidence);
+  }
+
+  return pickFamilyEvidence(evidence);
 }
 
 // ---------- main entry ----------

@@ -433,7 +433,7 @@ export default function EmmcTool() {
           <>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <Stat label="Dump size" value={formatBytes(file1.size)} />
-              <Stat label="PT type" value={ptTypeLabel(gptFound, userAreaAnalysis, parts.length)} accent={parts.length > 0} />
+              <Stat label="PT type" value={ptTypeLabel(gptFound, userAreaAnalysis, parts)} accent={parts.length > 0} />
               <Stat label="Partitions" value={String(parts.length)} />
               <Stat label="Status" value={dirty ? `Modified (${Object.keys(replacements).length})` : 'Original'} accent={dirty} />
             </div>
@@ -490,12 +490,18 @@ export default function EmmcTool() {
   );
 }
 
-function ptTypeLabel(gptFound, userAreaAnalysis, partCount) {
+function ptTypeLabel(gptFound, userAreaAnalysis, parts) {
   if (gptFound) return 'GPT';
-  if (userAreaAnalysis?.tableType === 'emmc_1630_5840') return 'eMMC 0x1630/0x5840 Map';
-  if (userAreaAnalysis?.tableType === 'aml_mpt') return 'Amlogic MPT';
-  if (userAreaAnalysis?.tableType === 'blkdevparts_mmc') return 'blkdevparts';
-  if (partCount) return 'MBR';
+  const selectedType = Array.isArray(parts) ? parts[0]?.ptType : null;
+  const t = selectedType || userAreaAnalysis?.tableType;
+  if (t === 'emmc_1630_5840') return 'eMMC 0x1630/0x5840 Map';
+  if (t === 'aml_mpt') return 'Amlogic MPT';
+  if (t === 'blkdevparts_mmc') return 'blkdevparts';
+  if (t === 'mtdparts_emmc') return 'mtdparts';
+  if (t === 'mbr') return 'MBR';
+  if (t && t !== 'none') return t;
+  const n = Array.isArray(parts) ? parts.length : parts;
+  if (n) return 'MBR';
   return 'None';
 }
 
