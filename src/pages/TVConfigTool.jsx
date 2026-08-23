@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Download, RotateCcw, ShieldCheck, Binary, FileCog, HardDrive } from 'lucide-react';
+import { Download, RotateCcw, ShieldCheck, Binary, FileCog, HardDrive, ArrowLeft } from 'lucide-react';
 import ToolNav from '@/components/ToolNav';
 import FileDropzone from '@/components/tv/FileDropzone';
 import HexViewer from '@/components/tv/HexViewer';
@@ -81,6 +81,14 @@ export default function TVConfigTool() {
     if (file) loadFile(file);
   };
 
+  const resetToStart = () => {
+    setFile(null);
+    setBytes(null);
+    setDirty(false);
+    setTab('hex');
+    setCrcHighlight(null);
+  };
+
   const autoRepairCrc = (buf) => {
     const width = crcConfig.variant === 'crc16_ccitt' ? 2 : 4;
     let fieldOffset;
@@ -123,6 +131,15 @@ export default function TVConfigTool() {
       <header className="border-b border-border bg-card/50 backdrop-blur sticky top-0 z-10">
         <div className="max-w-6xl mx-auto px-5 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
+            {bytes && (
+              <button
+                type="button"
+                onClick={resetToStart}
+                className="flex items-center gap-1.5 text-xs rounded-md border border-border px-3 py-1.5 hover:bg-accent transition-colors"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" /> Back
+              </button>
+            )}
             <div className="w-9 h-9 rounded-lg bg-emerald-600 flex items-center justify-center">
               <FileCog className="w-5 h-5 text-white" />
             </div>
@@ -154,7 +171,7 @@ export default function TVConfigTool() {
       </header>
 
       <main className="max-w-6xl mx-auto px-5 py-6 space-y-4">
-        <FileDropzone onFile={loadFile} file={file} onClear={() => { setFile(null); setBytes(null); setDirty(false); }} />
+        <FileDropzone onFile={loadFile} file={file} onClear={resetToStart} />
 
         {bytes && (
           <>

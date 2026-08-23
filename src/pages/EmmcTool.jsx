@@ -12,8 +12,10 @@ import { analyzeFirmware, firmwarePartitionsToParts } from '@/lib/firmwareParser
 import { analyzeUserArea } from '@/lib/userAreaParser';
 import { selectDumpParts } from '@/lib/userArea/selectDumpParts';
 import UserAreaAnalysis from '@/components/emmc/UserAreaAnalysis';
+import FilesystemDetections from '@/components/emmc/FilesystemDetections';
 import { formatBytes } from '@/lib/binaryUtils';
 import { isExt4 } from '@/lib/ext4';
+import { scanFilesystems } from '@/lib/detectFilesystems';
 import { crc32Init, crc32Update, crc32Final } from '@/lib/crc32';
 import { toast } from '@/components/ui/use-toast';
 import { Progress } from '@/components/ui/progress';
@@ -45,6 +47,10 @@ export default function EmmcTool() {
   // so Amlogic/MTK/LG/etc. images still show an actionable partition table.
   const userAreaAnalysis = useMemo(() => (gptBytes && file1 ? analyzeUserArea(gptBytes, file1.size) : null), [gptBytes, file1]);
   const gptFound = gptBytes ? hasGpt(gptBytes) : false;
+  const filesystemHits = useMemo(
+    () => (gptBytes ? scanFilesystems(gptBytes, file1?.size || gptBytes.length) : []),
+    [gptBytes, file1],
+  );
   const parts = useMemo(() => selectDumpParts({
     hasGpt: gptFound,
     gptParts,
@@ -113,6 +119,20 @@ export default function EmmcTool() {
       setBusy(false);
       setProgress(null);
     }
+  };
+
+  const resetToStart = () => {
+    setFile1(null);
+    setGptBytes(null);
+    setTailBytes(null);
+    setReplacements({});
+    setExt4Map({});
+    setLog([]);
+    setExplorePart(null);
+    setExploreBytes(null);
+    setBusy(false);
+    setProgress(null);
+    setSelected(new Set());
   };
 
   const revert = () => {
@@ -396,6 +416,15 @@ export default function EmmcTool() {
       <header className="border-b border-border bg-card/50 backdrop-blur sticky top-0 z-10">
         <div className="max-w-6xl mx-auto px-5 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
+            {file1 && (
+              <button
+                type="button"
+                onClick={resetToStart}
+                className="flex items-center gap-1.5 text-xs rounded-md border border-border px-3 py-1.5 hover:bg-accent transition-colors"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" /> Back
+              </button>
+            )}
             <div className="w-9 h-9 rounded-lg bg-sky-600 flex items-center justify-center"><HardDrive className="w-5 h-5 text-white" /></div>
             <div>
               <h1 className="text-base font-semibold tracking-tight">EMMC Dump Tool</h1>
@@ -415,7 +444,7 @@ export default function EmmcTool() {
       <main className="max-w-6xl mx-auto px-5 py-6 space-y-6">
         <div>
           <p className="text-xs font-medium text-muted-foreground mb-2">EMMC Dump</p>
-          <FileDropzone onFile={loadMain} file={file1} onClear={() => { setFile1(null); setGptBytes(null); setTailBytes(null); setReplacements({}); }} />
+          <FileDropzone onFile={loadMain} file={file1} onClear={resetToStart} />
         </div>
 
         {progress && (
@@ -455,6 +484,8 @@ export default function EmmcTool() {
             <input ref={replaceSelectedInputRef} type="file" className="hidden" multiple onChange={(e) => { const fs = Array.from(e.target.files || []); if (fs.length) replaceSelectedFiles(fs); e.target.value = ''; }} />
 
             <UserAreaAnalysis analysis={userAreaAnalysis} />
+
+            <FilesystemDetections hits={filesystemHits} scannedBytes={gptBytes?.length || 0} />
 
             <div className="grid lg:grid-cols-3 gap-6 lg:items-start">
               <div className="lg:col-span-2 rounded-xl border border-border bg-card overflow-hidden flex flex-col min-h-0 max-h-[min(36rem,70vh)]">

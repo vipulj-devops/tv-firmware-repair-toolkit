@@ -4,15 +4,21 @@ export const STRICT_USER_AREA_TYPES = ['emmc_1630_5840', 'aml_mpt', 'blkdevparts
 
 const STRICT = new Set(STRICT_USER_AREA_TYPES);
 
+function dumpFirmwareParts(firmwareParts) {
+  return (firmwareParts || []).filter((p) => p && p.vendorSource !== 'descriptor' && p.source !== 'descriptor');
+}
+
 // PartitionTable source: valid GPT, then a non-empty strict registry map,
 // then usable primary MBR (gptParts from autoMapPartitions when !hasGpt),
-// then heuristic user-area parts, then firmware-package fallback.
+// then heuristic user-area parts, then structured firmware-package fallback.
+// Generic descriptor scans are never a dump partition table.
 export function selectDumpParts({ hasGpt, gptParts, userAreaAnalysis, firmwareParts }) {
   const gpt = gptParts || [];
   const ua = userAreaToParts(userAreaAnalysis);
+  const firmware = dumpFirmwareParts(firmwareParts);
   if (hasGpt) return gpt;
   if (userAreaAnalysis && STRICT.has(userAreaAnalysis.tableType) && ua.length >= 1) return ua;
   if (gpt.length >= 1) return gpt;
   if (ua.length >= 1) return ua;
-  return firmwareParts || [];
+  return firmware;
 }

@@ -574,6 +574,12 @@ function detectFamily(bytes, fileName, tailBytes) {
 
 // ---------- main entry ----------
 
+// Generic binary descriptor hits are firmware-package heuristics, not a
+// validated eMMC partition table. They must not enter dump PT selection.
+export function isDumpFirmwarePartition(p) {
+  return p && p.source && p.source !== 'descriptor';
+}
+
 // Convert firmware-parser partitions (hex-string start/size) into the
 // PartitionTable shape (numeric startByte/size, ptType, index) so vendor
 // firmware files show up in the actionable partition table.
@@ -582,6 +588,7 @@ export function firmwarePartitionsToParts(analysis, fileSize) {
   const out = [];
   let idx = 0;
   for (const p of analysis.partitions) {
+    if (!isDumpFirmwarePartition(p)) continue;
     const size = parseSizeNum(p.size);
     const start = parseSizeNum(p.start);
     if (size == null && start == null) continue;
@@ -640,7 +647,7 @@ export function analyzeFirmware(bytes, fileName = '', fileSize = 0, tailBytes = 
       { label: 'Container extension', value: ext },
       { label: 'Header bytes', value: hex(bytes, 16) },
       { label: 'Scanned region', value: `${Math.min(bytes.length, TEXT_SCAN_CAP).toLocaleString()} bytes` },
-      { label: 'Partitions found', value: String(parts.length) },
+      { label: 'Partitions found', value: String(parts.filter(isDumpFirmwarePartition).length) },
     ],
     scripts,
     partitions: parts.slice(0, 48),
