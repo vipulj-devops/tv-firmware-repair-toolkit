@@ -50,11 +50,7 @@ export function writeUint32BE(bytes, offset, value) {
   bytes[offset + 3] = value & 0xff;
 }
 
-export function formatBytes(n) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(2)} MB`;
-}
+export { formatFileSize as formatBytes } from './formatFileSize.js';
 
 // Try to detect printable-string config entries (key=value or NULL-separated).
 export function scanStrings(bytes) {
