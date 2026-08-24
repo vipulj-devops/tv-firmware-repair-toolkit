@@ -198,49 +198,89 @@ export function getAllocatedSpace(bytes, inodeNum, sb) {
   return totalBlocks * sb.blockSize;
 }
 
+function encodePatchContent(newContent) {
+  if (typeof newContent === 'string') return new TextEncoder().encode(newContent);
+  if (!(newContent instanceof Uint8Array)) throw new Error('newContent must be a string or Uint8Array');
+  return newContent;
+}
+
+function u32le(value) {
+  const out = new Uint8Array(4);
+  let v = value;
+  for (let i = 0; i < 4; i += 1) {
+    out[i] = v % 256;
+    v = Math.floor(v / 256);
+  }
+  return out;
+}
+
+// Shared in-place patch planner. Writes existing extent blocks only;
+// never allocates filesystem blocks. Callers apply `writes` to a Uint8Array
+// or overlay IO.
+export function computeInPlacePatch({ extents, blockSize, inodeOffset, origSize, newContent }) {
+  if (!(newContent instanceof Uint8Array)) throw new Error('newContent must be a Uint8Array');
+  if (!Number.isSafeInteger(blockSize) || blockSize <= 0) throw new Error('blockSize must be a positive safe integer');
+  if (!Number.isSafeInteger(inodeOffset) || inodeOffset < 0) throw new Error('inodeOffset must be a safe integer >= 0');
+  if (!Number.isSafeInteger(origSize) || origSize < 0) throw new Error('origSize must be a safe integer >= 0');
+  if (!extents || !extents.length) {
+    throw new Error('File has no extent-mapped data blocks (unsupported layout).');
+  }
+  const sorted = extents.slice().sort((a, b) => a.logical - b.logical);
+  const totalBlocks = sorted.reduce((m, e) => Math.max(m, e.logical + e.len), 0);
+  const allocatedSpace = totalBlocks * blockSize;
+  if (!Number.isSafeInteger(allocatedSpace)) {
+    throw new Error('allocated extent span is not a safe integer');
+  }
+  if (newContent.length > allocatedSpace) {
+    throw new Error(`New content (${newContent.length} B) exceeds allocated block space (${allocatedSpace} B). In-place edit cannot grow beyond allocated blocks.`);
+  }
+
+  const writes = [];
+  let written = 0;
+  for (const e of sorted) {
+    for (let b = 0; b < e.len; b += 1) {
+      const dst = (e.physical + b) * blockSize;
+      if (!Number.isSafeInteger(dst) || dst < 0) {
+        throw new Error('extent physical offset is not a safe integer');
+      }
+      const chunk = new Uint8Array(blockSize);
+      if (written < newContent.length) {
+        const take = Math.min(blockSize, newContent.length - written);
+        chunk.set(newContent.subarray(written, written + take), 0);
+        written += take;
+      }
+      writes.push({ offset: dst, bytes: chunk });
+    }
+  }
+
+  const newSize = newContent.length;
+  if (newSize !== origSize) {
+    const sizeLo = newSize % 0x100000000;
+    const sizeHi = Math.floor(newSize / 0x100000000);
+    writes.push({ offset: inodeOffset + 0x04, bytes: u32le(sizeLo) });
+    writes.push({ offset: inodeOffset + 0x6C, bytes: u32le(sizeHi) });
+  }
+  return { writes, origSize, newSize, allocatedSpace };
+}
+
 // Patch a regular file's content in place. newContent can grow up to the
 // file's allocated block space (block-aligned size), but not beyond it.
 export function patchFile(bytes, inodeNum, sb, newContent) {
   const inode = readInode(bytes, inodeNum, sb);
   if (!isReg(inode)) throw new Error('Not a regular file');
   const origSize = inodeSize(inode);
-  const newBytes = typeof newContent === 'string'
-    ? new TextEncoder().encode(newContent)
-    : newContent;
+  const newBytes = encodePatchContent(newContent);
   const extents = [];
   collectExtents(bytes, inode.blockOff, sb, extents);
-  if (!extents.length) throw new Error('File has no extent-mapped data blocks (unsupported layout).');
-  extents.sort((a, b) => a.logical - b.logical);
-  const totalBlocks = extents.reduce((m, e) => Math.max(m, e.logical + e.len), 0);
-  const allocatedSpace = totalBlocks * sb.blockSize;
-  if (newBytes.length > allocatedSpace) {
-    throw new Error(`New content (${newBytes.length} B) exceeds allocated block space (${allocatedSpace} B). In-place edit cannot grow beyond allocated blocks.`);
-  }
-  // write new content into data blocks, zero-pad remainder of each block
-  let written = 0;
-  for (const e of extents) {
-    for (let b = 0; b < e.len; b++) {
-      const dst = (e.physical + b) * sb.blockSize;
-      if (written < newBytes.length) {
-        const chunk = newBytes.subarray(written, written + sb.blockSize);
-        bytes.set(chunk, dst);
-        written += chunk.length;
-        for (let i = chunk.length; i < sb.blockSize; i++) bytes[dst + i] = 0;
-      } else {
-        for (let i = 0; i < sb.blockSize; i++) bytes[dst + i] = 0;
-      }
-    }
-  }
-  // update i_size (grow or shrink)
-  const newSize = newBytes.length;
-  if (newSize !== origSize) {
-    const off = inode.offset;
-    bytes[off + 0x04] = newSize & 0xff;
-    bytes[off + 0x05] = (newSize >>> 8) & 0xff;
-    bytes[off + 0x06] = (newSize >>> 16) & 0xff;
-    bytes[off + 0x07] = (newSize >>> 24) & 0xff;
-  }
-  return { origSize, newSize, allocatedSpace, extents: extents.length };
+  const plan = computeInPlacePatch({
+    extents,
+    blockSize: sb.blockSize,
+    inodeOffset: inode.offset,
+    origSize,
+    newContent: newBytes,
+  });
+  for (const w of plan.writes) bytes.set(w.bytes, w.offset);
+  return { origSize: plan.origSize, newSize: plan.newSize, allocatedSpace: plan.allocatedSpace, extents: extents.length };
 }
 
 // ============================================================

@@ -163,6 +163,6 @@ describe('Explore 1 GiB gate removed', () => {
     const src = readFileSync(join(dir, '../src/pages/EmmcTool.jsx'), 'utf8');
     assert.equal(src.includes('EXPLORE_LIMIT'), false);
     assert.equal(/explore supports partitions up to 1 GB/i.test(src), false);
-    assert.equal(src.includes('createFileRangeReader'), true);
+    assert.equal(src.includes('loadExplorePartition'), true);
   });
 });

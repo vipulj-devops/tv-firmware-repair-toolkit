@@ -19,7 +19,7 @@ export async function parseSuperblockRange(reader) {
   return parseSuperblock(head);
 }
 
-async function readInodeRange(reader, inodeNum, sb) {
+export async function readInodeRange(reader, inodeNum, sb) {
   const group = Math.floor((inodeNum - 1) / sb.inodesPerGroup);
   const index = (inodeNum - 1) % sb.inodesPerGroup;
   const bgd = sb.gdtOffset + group * sb.descSize;
@@ -40,7 +40,7 @@ async function readInodeRange(reader, inodeNum, sb) {
   };
 }
 
-async function collectExtentsRange(reader, node, sb, out) {
+export async function collectExtentsRange(reader, node, sb, out) {
   const magic = u16(node, 0);
   if (magic !== 0xf30a) return;
   const entries = u16(node, 2);

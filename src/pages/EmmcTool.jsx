@@ -15,7 +15,8 @@ import UserAreaAnalysis from '@/components/emmc/UserAreaAnalysis';
 import FilesystemDetections from '@/components/emmc/FilesystemDetections';
 import { formatBytes } from '@/lib/binaryUtils';
 import { isExt4 } from '@/lib/ext4';
-import { createFileRangeReader } from '@/lib/rangeReader';
+import { loadExplorePartition } from '@/lib/exploreSession';
+import { composeDumpBlob, getPartitionBlob as composePartitionBlob } from '@/lib/dumpCompose';
 import { scanFilesystems } from '@/lib/detectFilesystems';
 import { crc32Init, crc32Update, crc32Final } from '@/lib/crc32';
 import { toast } from '@/components/ui/use-toast';
@@ -29,11 +30,15 @@ export default function EmmcTool() {
   const [gptBytes, setGptBytes] = useState(null);
   const [tailBytes, setTailBytes] = useState(null);
   const [replacements, setReplacements] = useState({}); // { partitionName: Uint8Array }
+  const [overlays, setOverlays] = useState({}); // { partitionName: overlay }
+  const [overlayTick, setOverlayTick] = useState(0);
   const [ext4Map, setExt4Map] = useState({});
   const [log, setLog] = useState([]);
   const [explorePart, setExplorePart] = useState(null);
   const [exploreBytes, setExploreBytes] = useState(null);
   const [exploreReader, setExploreReader] = useState(null);
+  const [exploreReadOnlyReason, setExploreReadOnlyReason] = useState(null);
+  const [exploreInPlaceOnly, setExploreInPlaceOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(null); // { label, percent } | null
   const [selected, setSelected] = useState(new Set());
@@ -58,7 +63,8 @@ export default function EmmcTool() {
     userAreaAnalysis,
     firmwareParts: firmwareAnalysis ? firmwarePartitionsToParts(firmwareAnalysis, file1?.size || 0) : [],
   }), [gptFound, gptParts, userAreaAnalysis, firmwareAnalysis, file1]);
-  const dirty = Object.keys(replacements).length > 0;
+  const overlayDirty = Object.values(overlays).some((o) => o && o.hasWrites());
+  const dirty = overlayTick >= 0 && (Object.keys(replacements).length > 0 || overlayDirty);
 
   const addLog = (msg) => setLog((l) => [...l, { time: new Date().toLocaleTimeString(), msg }]);
 
@@ -92,9 +98,13 @@ export default function EmmcTool() {
   const loadMain = async (f) => {
     setFile1(f);
     setReplacements({});
+    setOverlays({});
+    setOverlayTick(0);
     setExplorePart(null);
     setExploreBytes(null);
     setExploreReader(null);
+    setExploreReadOnlyReason(null);
+    setExploreInPlaceOnly(false);
     setBusy(true);
     setProgress({ label: `Reading ${f.name}…`, percent: 0 });
     try {
@@ -128,11 +138,15 @@ export default function EmmcTool() {
     setGptBytes(null);
     setTailBytes(null);
     setReplacements({});
+    setOverlays({});
+    setOverlayTick(0);
     setExt4Map({});
     setLog([]);
     setExplorePart(null);
     setExploreBytes(null);
     setExploreReader(null);
+    setExploreReadOnlyReason(null);
+    setExploreInPlaceOnly(false);
     setBusy(false);
     setProgress(null);
     setSelected(new Set());
@@ -140,9 +154,13 @@ export default function EmmcTool() {
 
   const revert = () => {
     setReplacements({});
+    setOverlays({});
+    setOverlayTick(0);
     setExplorePart(null);
     setExploreBytes(null);
     setExploreReader(null);
+    setExploreReadOnlyReason(null);
+    setExploreInPlaceOnly(false);
     addLog('Reverted all changes');
   };
 
@@ -206,23 +224,7 @@ export default function EmmcTool() {
     } finally { setBusy(false); }
   };
 
-  // Compose output blob from original file slices + in-memory replacement data.
-  // File slices are lazy (disk-backed), so multi-GB output streams without loading fully.
-  const buildOutputBlob = () => {
-    if (!dirty) return file1;
-    const replacedParts = parts
-      .filter((p) => replacements[p.name])
-      .sort((a, b) => a.startByte - b.startByte);
-    const blobParts = [];
-    let cursor = 0;
-    for (const p of replacedParts) {
-      if (p.startByte > cursor) blobParts.push(file1.slice(cursor, p.startByte));
-      blobParts.push(replacements[p.name]);
-      cursor = p.startByte + p.size;
-    }
-    if (cursor < file1.size) blobParts.push(file1.slice(cursor));
-    return new Blob(blobParts, { type: 'application/octet-stream' });
-  };
+  const buildOutputBlob = () => composeDumpBlob({ file: file1, parts, replacements, overlays });
 
   const downloadDump = async (crcConfig) => {
     let blob = buildOutputBlob();
@@ -266,10 +268,7 @@ export default function EmmcTool() {
     addLog(`Downloaded dump (${formatBytes(file1.size)})${dirty ? ` · ${Object.keys(replacements).length} partitions replaced` : ''}${crcConfig?.enabled ? ' · CRC repaired' : ''}`);
   };
 
-  const getPartitionBlob = (p) => {
-    if (replacements[p.name]) return new Blob([replacements[p.name]], { type: 'application/octet-stream' });
-    return file1.slice(p.startByte, p.startByte + p.size);
-  };
+  const getPartitionBlob = (p) => composePartitionBlob({ file: file1, partition: p, replacements, overlays });
 
   const unpackAll = async () => {
     if (!parts.length) { toast({ variant: 'destructive', title: 'No partitions', description: 'No GPT partitions found to unpack.' }); return; }
@@ -352,25 +351,35 @@ export default function EmmcTool() {
   };
 
   const explore = async (p) => {
-    if (replacements[p.name]) {
-      setExploreReader(null);
-      setExploreBytes(replacements[p.name]);
-      setExplorePart(p);
-      addLog(`Exploring partition "${p.name}" (${formatBytes(p.size)})`);
-      return;
-    }
     setBusy(true);
     try {
-      const rdr = createFileRangeReader(file1, p.startByte, p.size);
-      const head = await rdr.read(0, Math.min(2048, p.size));
-      if (!isExt4(head)) {
-        toast({ variant: 'destructive', title: 'Explore failed', description: `"${p.name}" does not look like ext4.` });
-        return;
-      }
-      setExploreBytes(null);
-      setExploreReader(rdr);
+      const session = await loadExplorePartition({
+        file: file1,
+        startByte: p.startByte,
+        size: p.size,
+        name: p.name,
+        replacementBytes: replacements[p.name] || null,
+        existingOverlay: overlays[p.name] || null,
+      });
+      setExploreBytes(session.bytes);
+      setExploreReader(session.reader);
+      setExploreReadOnlyReason(session.readOnlyReason);
+      setExploreInPlaceOnly(!!session.inPlaceOnly);
       setExplorePart(p);
-      addLog(`Exploring partition "${p.name}" (${formatBytes(p.size)}) via ranged reads`);
+      if (session.overlay) {
+        setOverlays((prev) => ({ ...prev, [p.name]: session.overlay }));
+      }
+      if (session.mode === 'memory') {
+        addLog(`Exploring partition "${p.name}" (${formatBytes(p.size)})`);
+      } else {
+        addLog(`Exploring partition "${p.name}" (${formatBytes(p.size)}) via ranged reads`);
+        if (session.memoryError) {
+          toast({
+            title: 'Large-partition explore',
+            description: session.readOnlyReason,
+          });
+        }
+      }
     } catch (e) {
       toast({ variant: 'destructive', title: 'Explore failed', description: e.message });
     } finally {
@@ -385,7 +394,7 @@ export default function EmmcTool() {
         <header className="border-b border-border bg-card/50 backdrop-blur sticky top-0 z-10">
           <div className="max-w-6xl mx-auto px-5 py-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <button type="button" onClick={() => { setExplorePart(null); setExploreBytes(null); setExploreReader(null); }} className="text-muted-foreground hover:text-foreground" aria-label="Back to partition table"><ArrowLeft className="w-4 h-4" /></button>
+              <button type="button" onClick={() => { setExplorePart(null); setExploreBytes(null); setExploreReader(null); setExploreReadOnlyReason(null); setExploreInPlaceOnly(false); }} className="text-muted-foreground hover:text-foreground" aria-label="Back to partition table"><ArrowLeft className="w-4 h-4" /></button>
               <div className="w-9 h-9 rounded-lg bg-sky-600 flex items-center justify-center"><HardDrive className="w-5 h-5 text-white" /></div>
               <div>
                 <h1 className="text-base font-semibold tracking-tight">Explore: {explorePart.name}</h1>
@@ -404,12 +413,20 @@ export default function EmmcTool() {
             <Ext4Browser
               bytes={exploreBytes}
               reader={exploreReader}
+              readOnlyReason={exploreReadOnlyReason}
+              inPlaceOnly={exploreInPlaceOnly}
               dirty={dirty}
               onPatched={(patched) => {
                 setReplacements((prev) => ({ ...prev, [explorePart.name]: patched }));
                 setExploreBytes(patched);
                 setExploreReader(null);
+                setExploreReadOnlyReason(null);
+                setExploreInPlaceOnly(false);
                 addLog(`Patched ext4 in "${explorePart.name}"`);
+              }}
+              onOverlayPatched={() => {
+                setOverlayTick((n) => n + 1);
+                addLog(`In-place edit in "${explorePart.name}"`);
               }}
               onDownload={downloadDump}
               onReset={revert}

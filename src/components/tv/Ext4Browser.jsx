@@ -24,7 +24,9 @@ const detectImageType = (raw) => {
   return null;
 };
 import { isExt4, parseSuperblock, listFiles, readFileBytes, patchFile, getAllocatedSpace, getFreeSpace, growAndPatchFile, deleteFile, createFile } from '@/lib/ext4';
-import { parseSuperblockRange, listFilesRange, readFileBytesRange, getFreeSpaceRange } from '@/lib/ext4Range';
+import { parseSuperblockRange, listFilesRange, readFileBytesRange, getFreeSpaceRange, getAllocatedSpaceRange } from '@/lib/ext4Range';
+import { patchExistingFileIo } from '@/lib/ext4PatchIo';
+import { INPLACE_TOO_LARGE_MESSAGE, LARGE_PARTITION_INPLACE_NOTE, EXT4_BEST_EFFORT_NOTE } from '@/lib/exploreSession';
 import { createZip } from '@/lib/zipWriter';
 import { formatBytes } from '@/lib/binaryUtils';
 import HexViewer from '@/components/tv/HexViewer';
@@ -85,6 +87,7 @@ function TreeNode({ node, depth, expanded, toggle, selected, onSelect, onAddFile
             {node.items.length ? (isExpanded ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />) : <span className="w-3.5 shrink-0" />}
             {isExpanded ? <FolderOpen className="w-4 h-4 text-amber-500 shrink-0" /> : <Folder className="w-4 h-4 text-amber-500 shrink-0" />}
             <span className="text-sm truncate flex-1">{node.name || '/'}</span>
+            {onAddFile && (
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); onAddFile(node.path); }}
@@ -93,6 +96,7 @@ function TreeNode({ node, depth, expanded, toggle, selected, onSelect, onAddFile
             >
               <Plus className="w-3.5 h-3.5" />
             </button>
+            )}
           </>
         ) : (
           <>
@@ -110,11 +114,14 @@ function TreeNode({ node, depth, expanded, toggle, selected, onSelect, onAddFile
   );
 }
 
-export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onReset, dirty }) {
-  const writable = !!bytes;
+export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, onOverlayPatched, onDownload, onReset, dirty, inPlaceOnly }) {
+  const memoryWritable = !!bytes;
+  const inPlaceWritable = memoryWritable || typeof reader?.write === 'function';
+  const growWritable = memoryWritable;
   const [rangeMeta, setRangeMeta] = useState(null);
   const [rangeErr, setRangeErr] = useState(null);
   const [rangeLoading, setRangeLoading] = useState(false);
+  const [rangeRev, setRangeRev] = useState(0); // Only for structural changes (add/delete/grow)
 
   useEffect(() => {
     if (bytes || !reader) {
@@ -145,7 +152,7 @@ export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onRe
       }
     })();
     return () => { cancelled = true; };
-  }, [reader, bytes]);
+  }, [reader, bytes, rangeRev]);
 
   const memSb = useMemo(() => (bytes && isExt4(bytes) ? parseSuperblock(bytes) : null), [bytes]);
   const memFiles = useMemo(() => (bytes && memSb ? listFiles(bytes, memSb) : []), [bytes, memSb]);
@@ -239,12 +246,22 @@ export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onRe
     ? (bytes ? getAllocatedSpace(bytes, selected.inode, sb) : (selected.allocated || selected.size || 0))
     : 0;
 
-  const requireWritable = () => {
-    if (writable) return true;
+  const requireInPlace = () => {
+    if (inPlaceWritable) return true;
     toast({
       variant: 'destructive',
       title: 'Read-only explore',
-      description: 'In-place edit, replace, delete, and add are unavailable for range-backed partitions. Viewing and extract still work.',
+      description: readOnlyReason || 'In-place edit and replace are unavailable. Viewing and extract still work.',
+    });
+    return false;
+  };
+
+  const requireGrow = () => {
+    if (growWritable) return true;
+    toast({
+      variant: 'destructive',
+      title: 'Not available on large partitions',
+      description: 'Add, delete, and growing a file past its allocated space are not supported for large partitions.',
     });
     return false;
   };
@@ -256,13 +273,25 @@ export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onRe
     ? regular.filter((f) => { const fld = selectedFolder.replace(/\/+$/, ''); return f.path === fld || f.path.startsWith(fld + '/'); })
     : regular;
 
-  const save = () => {
-    if (!requireWritable()) return;
+  const save = async () => {
+    if (!requireInPlace()) return;
     setError('');
     try {
-      const next = new Uint8Array(bytes);
-      const res = patchFile(next, selected.inode, sb, content);
-      onPatched(next);
+      if (memoryWritable) {
+        const next = new Uint8Array(bytes);
+        const res = patchFile(next, selected.inode, sb, content);
+        onPatched(next);
+        setOrigContent(content);
+        setSelected({ ...selected, size: res.newSize });
+        toast({ title: 'Saved successfully', description: `${selected.path} updated in-place (${res.newSize} B)` });
+        return;
+      }
+      const alloc = await getAllocatedSpaceRange(reader, selected.inode, sb);
+      const encoded = new TextEncoder().encode(content);
+      if (encoded.length > alloc) throw new Error(INPLACE_TOO_LARGE_MESSAGE);
+      const res = await patchExistingFileIo(reader, selected.inode, sb, content);
+      onOverlayPatched?.();
+      // Don't increment rangeRev for in-place edits (Issue #1 fix)
       setOrigContent(content);
       setSelected({ ...selected, size: res.newSize });
       toast({ title: 'Saved successfully', description: `${selected.path} updated in-place (${res.newSize} B)` });
@@ -271,15 +300,32 @@ export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onRe
 
   const dirtyFile = content !== origContent;
 
-  const editByteInFile = (index, value) => {
-    if (!requireWritable()) return;
-    const raw = readFileBytes(bytes, selected.inode, sb);
-    raw[index] = value & 0xff;
-    const next = new Uint8Array(bytes);
-    patchFile(next, selected.inode, sb, raw);
-    onPatched(next);
-    setRawBytes(raw);
-    setImgDirty(true);
+  const editByteInFile = async (index, value) => {
+    if (!requireInPlace()) return;
+    try {
+      if (memoryWritable) {
+        const raw = readFileBytes(bytes, selected.inode, sb);
+        raw[index] = value & 0xff;
+        const next = new Uint8Array(bytes);
+        patchFile(next, selected.inode, sb, raw);
+        onPatched(next);
+        setRawBytes(raw);
+        setImgDirty(true);
+        return;
+      }
+      const raw = await readFileBytesRange(reader, selected.inode, sb);
+      raw[index] = value & 0xff;
+      const alloc = await getAllocatedSpaceRange(reader, selected.inode, sb);
+      if (raw.length > alloc) throw new Error(INPLACE_TOO_LARGE_MESSAGE);
+      await patchExistingFileIo(reader, selected.inode, sb, raw);
+      onOverlayPatched?.();
+      // Don't increment rangeRev for in-place edits (Issue #1 fix)
+      setRawBytes(raw);
+      setImgDirty(true);
+    } catch (e) {
+      setError(e.message || String(e));
+      toast({ variant: 'destructive', title: 'Save failed', description: e.message || String(e) });
+    }
   };
 
   const exportFile = async () => {
@@ -294,35 +340,46 @@ export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onRe
   };
 
   const replaceFile = (file) => {
-    if (!requireWritable()) return;
+    if (!requireInPlace()) return;
     setError('');
-    const reader = new FileReader();
-    reader.onload = () => {
-      const newBytes = new Uint8Array(reader.result);
+    const fileReader = new FileReader();
+    fileReader.onload = async () => {
+      const newBytes = new Uint8Array(fileReader.result);
       try {
-        const next = new Uint8Array(bytes);
-        const res = newBytes.length > allocSpace
-          ? growAndPatchFile(next, selected.inode, sb, newBytes)
-          : patchFile(next, selected.inode, sb, newBytes);
-        onPatched(next);
+        if (memoryWritable) {
+          const next = new Uint8Array(bytes);
+          const res = newBytes.length > allocSpace
+            ? growAndPatchFile(next, selected.inode, sb, newBytes)
+            : patchFile(next, selected.inode, sb, newBytes);
+          onPatched(next);
+          setSelected({ ...selected, size: res.newSize });
+          setImgDirty(true);
+          toast({
+            title: 'Replace successful',
+            description: res.grown
+              ? `${selected.path} grown by ${res.grown} blocks → ${res.newSize} B`
+              : `${selected.path} updated (${res.newSize} B)`,
+          });
+          return;
+        }
+        const alloc = await getAllocatedSpaceRange(reader, selected.inode, sb);
+        if (newBytes.length > alloc) throw new Error(INPLACE_TOO_LARGE_MESSAGE);
+        const res = await patchExistingFileIo(reader, selected.inode, sb, newBytes);
+        onOverlayPatched?.();
+        // Don't increment rangeRev for in-place edits (Issue #1 fix)
         setSelected({ ...selected, size: res.newSize });
         setImgDirty(true);
-        toast({
-          title: 'Replace successful',
-          description: res.grown
-            ? `${selected.path} grown by ${res.grown} blocks → ${res.newSize} B`
-            : `${selected.path} updated (${res.newSize} B)`,
-        });
+        toast({ title: 'Replace successful', description: `${selected.path} updated (${res.newSize} B)` });
       } catch (e) {
         setError(e.message || String(e));
         toast({ variant: 'destructive', title: 'Replace failed', description: e.message || String(e) });
       }
     };
-    reader.readAsArrayBuffer(file);
+    fileReader.readAsArrayBuffer(file);
   };
 
   const deleteSelected = () => {
-    if (!requireWritable()) return;
+    if (!requireGrow()) return;
     if (!window.confirm(`Delete "${selected.path}" from the ext4 partition? This reclaims its data blocks.`)) return;
     setError('');
     try {
@@ -344,12 +401,12 @@ export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onRe
   };
 
   const addFile = (file) => {
-    if (!requireWritable()) return;
+    if (!requireGrow()) return;
     setError('');
-    const reader = new FileReader();
-    reader.onload = () => {
+    const fileReader = new FileReader();
+    fileReader.onload = () => {
       try {
-        const data = new Uint8Array(reader.result);
+        const data = new Uint8Array(fileReader.result);
         const next = new Uint8Array(bytes);
         const folder = addTargetFolder.current;
         const res = createFile(next, sb, folder, file.name, data);
@@ -361,7 +418,7 @@ export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onRe
         toast({ variant: 'destructive', title: 'Add failed', description: e.message || String(e) });
       }
     };
-    reader.readAsArrayBuffer(file);
+    fileReader.readAsArrayBuffer(file);
   };
 
   const extractAll = async () => {
@@ -441,30 +498,51 @@ export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onRe
   };
 
   const replaceFromFolder = async (fileList) => {
-    if (!requireWritable()) return;
+    if (growWritable) {
+      if (!requireGrow()) return;
+    } else if (!requireInPlace()) return;
     setBulkBusy(true);
-    let next = new Uint8Array(bytes);
     let replaced = 0;
     const failed = [];
-    for (const file of fileList) {
-      const relPath = (file.webkitRelativePath || file.name).replace(/^\//, '');
-      const match = scopedRegular.find((f) => f.path.replace(/^\//, '') === relPath);
-      if (!match) continue;
-      const buf = await file.arrayBuffer();
-      const newBytes = new Uint8Array(buf);
-      const alloc = getAllocatedSpace(next, match.inode, sb);
-      try {
-        if (newBytes.length > alloc) {
-          growAndPatchFile(next, match.inode, sb, newBytes);
-        } else {
-          patchFile(next, match.inode, sb, newBytes);
+    if (memoryWritable) {
+      let next = new Uint8Array(bytes);
+      for (const file of fileList) {
+        const relPath = (file.webkitRelativePath || file.name).replace(/^\//, '');
+        const match = scopedRegular.find((f) => f.path.replace(/^\//, '') === relPath);
+        if (!match) continue;
+        const buf = await file.arrayBuffer();
+        const newBytes = new Uint8Array(buf);
+        const alloc = getAllocatedSpace(next, match.inode, sb);
+        try {
+          if (newBytes.length > alloc) growAndPatchFile(next, match.inode, sb, newBytes);
+          else patchFile(next, match.inode, sb, newBytes);
+          replaced++;
+        } catch (e) {
+          failed.push(`${relPath}: ${e.message}`);
         }
-        replaced++;
-      } catch (e) {
-        failed.push(`${relPath}: ${e.message}`);
+      }
+      if (replaced > 0) onPatched(next);
+    } else {
+      for (const file of fileList) {
+        const relPath = (file.webkitRelativePath || file.name).replace(/^\//, '');
+        const match = scopedRegular.find((f) => f.path.replace(/^\//, '') === relPath);
+        if (!match) continue;
+        const buf = await file.arrayBuffer();
+        const newBytes = new Uint8Array(buf);
+        try {
+          const alloc = await getAllocatedSpaceRange(reader, match.inode, sb);
+          if (newBytes.length > alloc) throw new Error(INPLACE_TOO_LARGE_MESSAGE);
+          await patchExistingFileIo(reader, match.inode, sb, newBytes);
+          replaced++;
+        } catch (e) {
+          failed.push(`${relPath}: ${e.message}`);
+        }
+      }
+      if (replaced > 0) {
+        onOverlayPatched?.();
+        // Don't increment rangeRev for in-place edits (Issue #1 fix)
       }
     }
-    if (replaced > 0) { onPatched(next); }
     toast({
       title: replaced > 0 ? 'Bulk replace done' : 'No files replaced',
       description: `${replaced} replaced${failed.length ? `, ${failed.length} failed` : ''}`,
@@ -490,21 +568,24 @@ export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onRe
             <button onClick={exportFile} className="flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent px-3 py-1.5 font-medium transition-colors">
               <Download className="w-3.5 h-3.5" /> Save
             </button>
-            <button disabled={!writable} onClick={() => replaceInputRef.current?.click()} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-3 py-1.5 font-medium transition-colors">
+            <button disabled={!inPlaceWritable} onClick={() => replaceInputRef.current?.click()} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-3 py-1.5 font-medium transition-colors">
               <Upload className="w-3.5 h-3.5" /> Replace
             </button>
-            <button disabled={!writable} onClick={deleteSelected} className="flex items-center gap-1.5 text-xs rounded-md bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white px-3 py-1.5 font-medium transition-colors">
+            <button disabled={!growWritable} title={growWritable ? 'Delete file' : 'Delete is not available on large partitions'} onClick={deleteSelected} className="flex items-center gap-1.5 text-xs rounded-md bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white px-3 py-1.5 font-medium transition-colors">
               <Trash2 className="w-3.5 h-3.5" /> Delete
             </button>
             {!isImage(selected.path) && !isBinary && (
-              <button onClick={save} disabled={!writable || !dirtyFile} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-3 py-1.5 font-medium transition-colors">
+              <button onClick={save} disabled={!inPlaceWritable || !dirtyFile} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-3 py-1.5 font-medium transition-colors">
                 <Save className="w-3.5 h-3.5" /> Save in-place
               </button>
             )}
           </div>
         </div>
-        {!writable && (
-          <p className="text-[11px] text-amber-600 mb-2">Read-only explore (range I/O). Extract and view work; in-place edit is disabled so the partition is not loaded into memory.</p>
+        {inPlaceOnly && (
+          <p className="text-[11px] text-muted-foreground mb-2">{LARGE_PARTITION_INPLACE_NOTE} Add, delete, and growing past allocated space are disabled. {EXT4_BEST_EFFORT_NOTE}</p>
+        )}
+        {!inPlaceWritable && (
+          <p className="text-[11px] text-amber-600 mb-2">{readOnlyReason || 'Read-only explore (range I/O). Extract and view work; in-place edit is disabled so the partition is not loaded into memory.'}</p>
         )}
         <input ref={replaceInputRef} type="file" className="hidden" accept={isImage(selected.path) ? 'image/*,.bmp' : '*/*'} onChange={(e) => { const f = e.target.files?.[0]; if (f) replaceFile(f); e.target.value = ''; }} />
         {isImage(selected.path) ? (
@@ -517,10 +598,11 @@ export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onRe
           </div>
         ) : isBinary ? (
           <div className="rounded-md border border-input bg-background min-h-[360px] overflow-hidden">
-            <HexViewer bytes={rawBytes} onEditByte={writable ? editByteInFile : () => {}} />
+            <HexViewer bytes={rawBytes} onEditByte={inPlaceWritable ? editByteInFile : () => {}} />
           </div>
         ) : (
           <textarea value={content} onChange={(e) => setContent(e.target.value)} spellCheck={false}
+            readOnly={!inPlaceWritable}
             className="flex-1 w-full resize-none rounded-md border border-input bg-background px-3 py-2 font-mono text-xs outline-none focus:ring-2 focus:ring-emerald-500/40 min-h-[360px]" />
         )}
         <div className="mt-2 flex items-center justify-between text-xs">
@@ -534,17 +616,20 @@ export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onRe
           {content.length > allocSpace && <span className="text-rose-500 flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> Exceeds allocated block space — save will fail</span>}
         </div>
         {error && <p className="mt-2 text-xs text-rose-500">{error}</p>}
-        <p className="mt-2 text-[11px] text-muted-foreground">{isImage(selected.path) ? (imgDirty ? 'Image replaced — rebuild & download to keep the change.' : `Allocated ${allocSpace} B · ${formatBytes(freeSpace)} free. Larger replacements auto-grow the file allocation into free space.`) : `Edits write back into the file's existing data blocks. Content can grow up to ${allocSpace} B (allocated block space).`}</p>
+        <p className="mt-2 text-[11px] text-muted-foreground">{isImage(selected.path) ? (imgDirty ? 'Image replaced — rebuild & download to keep the change.' : (inPlaceOnly ? `Allocated ${allocSpace} B. Replacements must fit in the file's existing allocated space.` : `Allocated ${allocSpace} B · ${formatBytes(freeSpace)} free. Larger replacements auto-grow the file allocation into free space.`)) : `Edits write back into the file's existing data blocks. Content can grow up to ${allocSpace} B (allocated block space).`}</p>
+        {memoryWritable && <p className="mt-1 text-[11px] text-muted-foreground">{EXT4_BEST_EFFORT_NOTE}</p>}
       </div>
     );
   }
 
   return (
     <div>
-      {!writable && (
+      {inPlaceOnly && (
+        <p className="text-[11px] text-muted-foreground mb-2">{LARGE_PARTITION_INPLACE_NOTE} Add, delete, and growing past allocated space are disabled. {EXT4_BEST_EFFORT_NOTE}</p>
+      )}
+      {!inPlaceWritable && (
         <p className="text-[11px] text-amber-600 mb-2">
-          Read-only explore via ranged reads — this partition is not loaded into memory.
-          Extract works; replace/add/edit require an in-memory copy (for example after Replace in the partition table).
+          {readOnlyReason || 'Read-only explore via ranged reads — this partition is not loaded into memory. Extract works; replace/add/edit require an in-memory copy.'}
         </p>
       )}
       <div className="flex flex-wrap items-center gap-2 mb-3 min-w-0">
@@ -565,10 +650,10 @@ export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onRe
           <button onClick={extractAll} disabled={extracting} className="flex items-center gap-1.5 text-xs rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white px-2.5 py-1.5 font-medium transition-colors">
             <Archive className="w-3.5 h-3.5" /> {extracting ? 'Extracting…' : (selectedFolder ? 'Extract selected' : 'Extract all')}
           </button>
-          <button onClick={() => folderInputRef.current?.click()} disabled={!writable || bulkBusy} className="flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-40 px-2.5 py-1.5 font-medium transition-colors">
+          <button onClick={() => folderInputRef.current?.click()} disabled={!inPlaceWritable || bulkBusy} title={growWritable ? undefined : 'Folder replace only updates files that already fit in allocated space'} className="flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-40 px-2.5 py-1.5 font-medium transition-colors">
             <FolderInput className="w-3.5 h-3.5" /> {bulkBusy ? 'Replacing…' : (selectedFolder ? 'Replace selected' : 'Replace all')}
           </button>
-          <button disabled={!writable} onClick={() => handleAddFile(selectedFolder)} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-2.5 py-1.5 font-medium transition-colors max-w-[260px]"><FilePlus className="w-3.5 h-3.5 shrink-0" /> <span className="truncate">Add file to {selectedFolder || '/'}</span></button>
+          <button disabled={!growWritable} title={growWritable ? 'Add file' : 'Add file is not available on large partitions'} onClick={() => handleAddFile(selectedFolder)} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-2.5 py-1.5 font-medium transition-colors max-w-[260px]"><FilePlus className="w-3.5 h-3.5 shrink-0" /> <span className="truncate">Add file to {selectedFolder || '/'}</span></button>
           <button onClick={() => setExpanded({ '/': true })} className="text-xs rounded-md border border-border hover:bg-accent px-2.5 py-1.5">Collapse all</button>
           <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter files…"
             className="rounded-md border border-input bg-background px-2.5 py-1.5 text-xs outline-none focus:ring-2 focus:ring-emerald-500/40 w-36 max-w-full" />
@@ -603,7 +688,7 @@ export default function Ext4Browser({ bytes, reader, onPatched, onDownload, onRe
       ) : (
         <div className="max-h-[400px] overflow-y-auto pr-1">
           {tree.items.map((c) => (
-            <TreeNode key={c.path} node={c} depth={0} expanded={expanded} toggle={toggle} selected={selected?.path} onSelect={setSelected} onAddFile={handleAddFile} onSelectFolder={setSelectedFolder} selectedFolder={selectedFolder} />
+            <TreeNode key={c.path} node={c} depth={0} expanded={expanded} toggle={toggle} selected={selected?.path} onSelect={setSelected} onAddFile={growWritable ? handleAddFile : undefined} onSelectFolder={setSelectedFolder} selectedFolder={selectedFolder} />
           ))}
         </div>
       )}
