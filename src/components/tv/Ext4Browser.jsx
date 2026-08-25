@@ -25,7 +25,7 @@ const detectImageType = (raw) => {
 };
 import { isExt4, parseSuperblock, listFiles, readFileBytes, patchFile, getAllocatedSpace, getFreeSpace, growAndPatchFile, deleteFile, createFile } from '@/lib/ext4';
 import { parseSuperblockRange, listFilesRange, readFileBytesRange, getFreeSpaceRange, getAllocatedSpaceRange } from '@/lib/ext4Range';
-import { patchExistingFileIo } from '@/lib/ext4PatchIo';
+import { patchExistingFileIo, createFileIo } from '@/lib/ext4PatchIo';
 import { INPLACE_TOO_LARGE_MESSAGE, LARGE_PARTITION_INPLACE_NOTE, EXT4_BEST_EFFORT_NOTE } from '@/lib/exploreSession';
 import { createZip } from '@/lib/zipWriter';
 import { formatBytes } from '@/lib/binaryUtils';
@@ -118,6 +118,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
   const memoryWritable = !!bytes;
   const inPlaceWritable = memoryWritable || typeof reader?.write === 'function';
   const growWritable = memoryWritable;
+  const addFileWritable = memoryWritable || inPlaceWritable;
   const [rangeMeta, setRangeMeta] = useState(null);
   const [rangeErr, setRangeErr] = useState(null);
   const [rangeLoading, setRangeLoading] = useState(false);
@@ -261,7 +262,17 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
     toast({
       variant: 'destructive',
       title: 'Not available on large partitions',
-      description: 'Add, delete, and growing a file past its allocated space are not supported for large partitions.',
+      description: 'Delete and growing a file past its allocated space are not supported for large partitions.',
+    });
+    return false;
+  };
+
+  const requireAddFile = () => {
+    if (addFileWritable) return true;
+    toast({
+      variant: 'destructive',
+      title: 'Read-only explore',
+      description: readOnlyReason || 'Add file is unavailable.',
     });
     return false;
   };
@@ -401,16 +412,24 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
   };
 
   const addFile = (file) => {
-    if (!requireGrow()) return;
+    if (!requireAddFile()) return;
     setError('');
     const fileReader = new FileReader();
-    fileReader.onload = () => {
+    fileReader.onload = async () => {
       try {
         const data = new Uint8Array(fileReader.result);
-        const next = new Uint8Array(bytes);
         const folder = addTargetFolder.current;
-        const res = createFile(next, sb, folder, file.name, data);
-        onPatched(next);
+        if (memoryWritable) {
+          const next = new Uint8Array(bytes);
+          const res = createFile(next, sb, folder, file.name, data);
+          onPatched(next);
+          setExpanded((e) => ({ ...e, [folder]: true }));
+          toast({ title: 'File added', description: `${file.name} → ${folder || '/'} (${res.size} B)` });
+          return;
+        }
+        const res = await createFileIo(reader, sb, folder, file.name, data);
+        onOverlayPatched?.();
+        setRangeRev((r) => r + 1);
         setExpanded((e) => ({ ...e, [folder]: true }));
         toast({ title: 'File added', description: `${file.name} → ${folder || '/'} (${res.size} B)` });
       } catch (e) {
@@ -582,7 +601,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
           </div>
         </div>
         {inPlaceOnly && (
-          <p className="text-[11px] text-muted-foreground mb-2">{LARGE_PARTITION_INPLACE_NOTE} Add, delete, and growing past allocated space are disabled. {EXT4_BEST_EFFORT_NOTE}</p>
+          <p className="text-[11px] text-muted-foreground mb-2">{LARGE_PARTITION_INPLACE_NOTE} {addFileWritable ? 'Delete and growing past allocated space are disabled.' : 'Add, delete, and growing past allocated space are disabled.'} {EXT4_BEST_EFFORT_NOTE}</p>
         )}
         {!inPlaceWritable && (
           <p className="text-[11px] text-amber-600 mb-2">{readOnlyReason || 'Read-only explore (range I/O). Extract and view work; in-place edit is disabled so the partition is not loaded into memory.'}</p>
@@ -625,7 +644,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
   return (
     <div>
       {inPlaceOnly && (
-        <p className="text-[11px] text-muted-foreground mb-2">{LARGE_PARTITION_INPLACE_NOTE} Add, delete, and growing past allocated space are disabled. {EXT4_BEST_EFFORT_NOTE}</p>
+        <p className="text-[11px] text-muted-foreground mb-2">{LARGE_PARTITION_INPLACE_NOTE} {addFileWritable ? 'Delete and growing past allocated space are disabled.' : 'Add, delete, and growing past allocated space are disabled.'} {EXT4_BEST_EFFORT_NOTE}</p>
       )}
       {!inPlaceWritable && (
         <p className="text-[11px] text-amber-600 mb-2">
@@ -653,7 +672,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
           <button onClick={() => folderInputRef.current?.click()} disabled={!inPlaceWritable || bulkBusy} title={growWritable ? undefined : 'Folder replace only updates files that already fit in allocated space'} className="flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-40 px-2.5 py-1.5 font-medium transition-colors">
             <FolderInput className="w-3.5 h-3.5" /> {bulkBusy ? 'Replacing…' : (selectedFolder ? 'Replace selected' : 'Replace all')}
           </button>
-          <button disabled={!growWritable} title={growWritable ? 'Add file' : 'Add file is not available on large partitions'} onClick={() => handleAddFile(selectedFolder)} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-2.5 py-1.5 font-medium transition-colors max-w-[260px]"><FilePlus className="w-3.5 h-3.5 shrink-0" /> <span className="truncate">Add file to {selectedFolder || '/'}</span></button>
+          <button disabled={!addFileWritable} title={addFileWritable ? 'Add file' : 'Add file is unavailable'} onClick={() => handleAddFile(selectedFolder)} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-2.5 py-1.5 font-medium transition-colors max-w-[260px]"><FilePlus className="w-3.5 h-3.5 shrink-0" /> <span className="truncate">Add file to {selectedFolder || '/'}</span></button>
           <button onClick={() => setExpanded({ '/': true })} className="text-xs rounded-md border border-border hover:bg-accent px-2.5 py-1.5">Collapse all</button>
           <input value={filter} onChange={(e) => setFilter(e.target.value)} placeholder="Filter files…"
             className="rounded-md border border-input bg-background px-2.5 py-1.5 text-xs outline-none focus:ring-2 focus:ring-emerald-500/40 w-36 max-w-full" />
@@ -688,7 +707,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
       ) : (
         <div className="max-h-[400px] overflow-y-auto pr-1">
           {tree.items.map((c) => (
-            <TreeNode key={c.path} node={c} depth={0} expanded={expanded} toggle={toggle} selected={selected?.path} onSelect={setSelected} onAddFile={growWritable ? handleAddFile : undefined} onSelectFolder={setSelectedFolder} selectedFolder={selectedFolder} />
+            <TreeNode key={c.path} node={c} depth={0} expanded={expanded} toggle={toggle} selected={selected?.path} onSelect={setSelected} onAddFile={addFileWritable ? handleAddFile : undefined} onSelectFolder={setSelectedFolder} selectedFolder={selectedFolder} />
           ))}
         </div>
       )}

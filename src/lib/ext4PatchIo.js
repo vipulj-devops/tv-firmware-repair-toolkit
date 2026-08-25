@@ -1,5 +1,5 @@
 import { computeInPlacePatch } from './ext4.js';
-import { readInodeRange, collectExtentsRange } from './ext4Range.js';
+import { readInodeRange, collectExtentsRange, resolveDirInodeRange } from './ext4Range.js';
 
 function encodePatchContent(newContent) {
   if (typeof newContent === 'string') return new TextEncoder().encode(newContent);
@@ -194,6 +194,41 @@ export async function allocateBlocksIo(io, sb, count) {
   return allocated;
 }
 
+export async function freeBlocksIo(io, sb, blocks) {
+  if (!blocks || !blocks.length) return;
+  const groupFreed = new Map();
+  for (const blk of blocks) {
+    const g = Math.floor((blk - sb.firstDataBlock) / sb.blocksPerGroup);
+    const bit = (blk - sb.firstDataBlock) - g * sb.blocksPerGroup;
+    const descOffset = sb.gdtOffset + g * sb.descSize;
+    const descData = await io.read(descOffset, sb.descSize);
+
+    const bitmapBlock = bgBitmapBlock(descData);
+    const bitmapOffset = bitmapBlock * sb.blockSize;
+    const byteIdx = bit >> 3;
+    const mask = 1 << (bit & 7);
+
+    const byteData = await io.read(bitmapOffset + byteIdx, 1);
+    byteData[0] &= ~mask;
+    await io.write(bitmapOffset + byteIdx, byteData);
+
+    groupFreed.set(g, (groupFreed.get(g) || 0) + 1);
+  }
+
+  for (const [g, c] of groupFreed) {
+    const descOffset = sb.gdtOffset + g * sb.descSize;
+    const descData = await io.read(descOffset, sb.descSize);
+    const freeBlocks = bgFreeBlocks(descData);
+    setBgFreeBlocks(descData, freeBlocks + c);
+    await io.write(descOffset, descData);
+  }
+
+  const sbData = await io.read(1024, sb.descSize >= 64 ? 352 : 264);
+  const sbFreeBlocks = readSbFreeBlocks(sbData);
+  setSbFreeBlocks(sbData, sbFreeBlocks + blocks.length);
+  await io.write(1024, sbData);
+}
+
 const ROOT_MAX = 4; // (60 - 12) / 12 entries in the inode i_block area
 function leafMax(blockSize) { return Math.floor((blockSize - 12) / 12); }
 
@@ -363,4 +398,108 @@ export async function createNewFileInodeIo(io, sb, inodeNum, extents, data) {
   await writeFileDataIo(io, sb, data, extents);
   await buildExtentTreeIo(io, inodeOffset + 0x28, sb, extents);
   await initializeFileInodeIo(io, inodeOffset, sb, inodeNum, extents, data.length);
+}
+
+function isDir(inode) {
+  return (inode.mode & 0xf000) === 0x4000;
+}
+
+function collectIndexLeafBlocksRange(iBlock) {
+  const depth = u16(iBlock, 6);
+  const entries = u16(iBlock, 2);
+  if (depth === 0) return [];
+  const leaves = [];
+  for (let i = 0; i < entries; i++) {
+    const e = 12 + i * 12;
+    leaves.push(u32(iBlock, e + 4) + u16(iBlock, e + 8) * 0x100000000);
+  }
+  return leaves;
+}
+
+export async function addDirentIo(io, parentInode, sb, name, targetInode) {
+  const blockSize = sb.blockSize;
+  const extents = [];
+  await collectExtentsRange(io, parentInode.iBlock, sb, extents);
+  extents.sort((a, b) => a.logical - b.logical);
+  const currentBlocks = extents.reduce((m, e) => Math.max(m, e.logical + e.len), 0);
+
+  const newBlock = (await allocateBlocksIo(io, sb, 1))[0];
+  const merged = [...extents, { logical: currentBlocks, physical: newBlock, len: 1 }].sort((a, b) => a.logical - b.logical);
+  const coalesced = [];
+  for (const e of merged) {
+    const last = coalesced[coalesced.length - 1];
+    if (last && last.logical + last.len === e.logical && last.physical + last.len === e.physical) {
+      last.len += e.len;
+    } else {
+      coalesced.push({ ...e });
+    }
+  }
+
+  if (u16(parentInode.iBlock, 6) > 0) {
+    const oldLeaves = collectIndexLeafBlocksRange(parentInode.iBlock);
+    if (oldLeaves.length) await freeBlocksIo(io, sb, oldLeaves);
+  }
+
+  await buildExtentTreeIo(io, parentInode.offset + 0x28, sb, coalesced);
+
+  const blockOff = newBlock * blockSize;
+  const blockBuf = new Uint8Array(blockSize);
+  wU32(blockBuf, 0, targetInode);
+  wU16(blockBuf, 4, blockSize);
+  blockBuf[6] = name.length;
+  blockBuf[7] = 1; // EXT4_FT_REG_FILE
+  for (let i = 0; i < name.length; i++) blockBuf[8 + i] = name.charCodeAt(i);
+
+  await io.write(blockOff, blockBuf);
+
+  const newSize = (currentBlocks + 1) * blockSize;
+
+  const sizeLo = new Uint8Array(4);
+  wU32(sizeLo, 0, newSize & 0xffffffff);
+  await io.write(parentInode.offset + 0x04, sizeLo);
+
+  const sizeHi = new Uint8Array(4);
+  wU32(sizeHi, 0, Math.floor(newSize / 0x100000000) & 0xffffffff);
+  await io.write(parentInode.offset + 0x6C, sizeHi);
+
+  const sectorsPerBlock = blockSize / 512;
+  const rawParent = await io.read(parentInode.offset, 128);
+  const curIBlocks = u32(rawParent, 0x1C);
+  const iBlocks = new Uint8Array(4);
+  wU32(iBlocks, 0, (curIBlocks + sectorsPerBlock) & 0xffffffff);
+  await io.write(parentInode.offset + 0x1C, iBlocks);
+}
+
+export async function createFileIo(io, sb, dirPath, name, content) {
+  if (!name || name.includes('/')) throw new Error('Invalid file name: ' + name);
+  const parentInodeNum = await resolveDirInodeRange(io, sb, dirPath);
+  if (!parentInodeNum) throw new Error('Target directory not found: ' + (dirPath || '/'));
+  const parentInode = await readInodeRange(io, parentInodeNum, sb);
+  if (!isDir(parentInode)) throw new Error('Target is not a directory: ' + (dirPath || '/'));
+
+  const data = typeof content === 'string' ? new TextEncoder().encode(content) : content;
+  if (!(data instanceof Uint8Array)) throw new Error('content must be a string or Uint8Array');
+
+  const blockSize = sb.blockSize;
+  const newInodeNum = await allocateInodeIo(io, sb);
+
+  let extents = [];
+  if (data.length > 0) {
+    const neededBlocks = Math.ceil(data.length / blockSize);
+    const dataBlocks = (await allocateBlocksIo(io, sb, neededBlocks)).slice().sort((a, b) => a - b);
+    const runs = [];
+    for (const blk of dataBlocks) {
+      const last = runs[runs.length - 1];
+      if (last && last.physical + last.len === blk) last.len++;
+      else runs.push({ physical: blk, len: 1 });
+    }
+    let cursor = 0;
+    extents = runs.map((r) => { const e = { logical: cursor, physical: r.physical, len: r.len }; cursor += r.len; return e; });
+  }
+
+  await createNewFileInodeIo(io, sb, newInodeNum, extents, data);
+  await addDirentIo(io, parentInode, sb, name, newInodeNum);
+
+  const totalBlocks = extents.reduce((m, e) => Math.max(m, e.logical + e.len), 0);
+  return { inode: newInodeNum, name, size: data.length, blocks: totalBlocks };
 }

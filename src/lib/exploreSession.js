@@ -18,7 +18,7 @@ export const MEMORY_LOAD_FAILED_REASON =
   'This partition could not be loaded into memory as a full copy. In-place editing of existing files still works via ranged reads.';
 
 export const LARGE_PARTITION_READONLY_REASON =
-  'This partition is larger than 1 GiB and is explored via ranged reads. In-place editing of existing extent-mapped files is available; add, delete, and growing past allocated space are not.';
+  'This partition is larger than 1 GiB and is explored via ranged reads. In-place editing of existing extent-mapped files and adding new files are available; delete and growing past allocated space are not.';
 
 export function usesMemoryEditor(partitionSize, hasReplacementBytes = false) {
   if (hasReplacementBytes) return true;
