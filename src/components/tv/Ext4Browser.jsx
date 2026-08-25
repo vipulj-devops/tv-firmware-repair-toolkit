@@ -26,7 +26,7 @@ const detectImageType = (raw) => {
 import { isExt4, parseSuperblock, listFiles, readFileBytes, patchFile, getAllocatedSpace, getFreeSpace, growAndPatchFile, deleteFile, createFile } from '@/lib/ext4';
 import { parseSuperblockRange, listFilesRange, readFileBytesRange, getFreeSpaceRange, getAllocatedSpaceRange } from '@/lib/ext4Range';
 import { patchExistingFileIo, createFileIo, growAndPatchFileIo, deleteFileIo } from '@/lib/ext4PatchIo';
-import { INPLACE_TOO_LARGE_MESSAGE, LARGE_PARTITION_INPLACE_NOTE, EXT4_BEST_EFFORT_NOTE } from '@/lib/exploreSession';
+import { INPLACE_TOO_LARGE_MESSAGE, EXT4_BEST_EFFORT_NOTE } from '@/lib/exploreSession';
 import { createZip } from '@/lib/zipWriter';
 import { formatBytes } from '@/lib/binaryUtils';
 import HexViewer from '@/components/tv/HexViewer';
@@ -624,9 +624,6 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
             )}
           </div>
         </div>
-        {inPlaceOnly && (
-          <p className="text-[11px] text-muted-foreground mb-2">{LARGE_PARTITION_INPLACE_NOTE} {addFileWritable ? 'Delete is disabled for large partitions.' : 'Add and delete are disabled for large partitions.'} {EXT4_BEST_EFFORT_NOTE}</p>
-        )}
         {!inPlaceWritable && (
           <p className="text-[11px] text-amber-600 mb-2">{readOnlyReason || 'Read-only explore (range I/O). Extract and view work; in-place edit is disabled so the partition is not loaded into memory.'}</p>
         )}
@@ -667,9 +664,6 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
 
   return (
     <div>
-      {inPlaceOnly && (
-        <p className="text-[11px] text-muted-foreground mb-2">{LARGE_PARTITION_INPLACE_NOTE} {addFileWritable ? 'Delete is disabled for large partitions.' : 'Add and delete are disabled for large partitions.'} {EXT4_BEST_EFFORT_NOTE}</p>
-      )}
       {!inPlaceWritable && (
         <p className="text-[11px] text-amber-600 mb-2">
           {readOnlyReason || 'Read-only explore via ranged reads — this partition is not loaded into memory. Extract works; replace/add/edit require an in-memory copy.'}
