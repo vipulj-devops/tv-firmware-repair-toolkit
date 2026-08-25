@@ -12,13 +12,13 @@ export const EXT4_BEST_EFFORT_NOTE =
   'Ext4 modifications are best-effort and do not update journal/metadata checksums.';
 
 export const INPLACE_TOO_LARGE_MESSAGE =
-  "Replacement is larger than the file's allocated space. Large-partition editing currently supports only in-place replacements.";
+  "Replacement is larger than the file's allocated space and cannot be expanded in hex byte edit mode.";
 
 export const MEMORY_LOAD_FAILED_REASON =
   'This partition could not be loaded into memory as a full copy. In-place editing of existing files still works via ranged reads.';
 
 export const LARGE_PARTITION_READONLY_REASON =
-  'This partition is larger than 1 GiB and is explored via ranged reads. In-place editing of existing extent-mapped files and adding new files are available; delete and growing past allocated space are not.';
+  'This partition is larger than 1 GiB and is explored via ranged reads. File editing, file replacement, file growth, and adding new files are available; delete is not.';
 
 export function usesMemoryEditor(partitionSize, hasReplacementBytes = false) {
   if (hasReplacementBytes) return true;

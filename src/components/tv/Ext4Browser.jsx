@@ -25,7 +25,7 @@ const detectImageType = (raw) => {
 };
 import { isExt4, parseSuperblock, listFiles, readFileBytes, patchFile, getAllocatedSpace, getFreeSpace, growAndPatchFile, deleteFile, createFile } from '@/lib/ext4';
 import { parseSuperblockRange, listFilesRange, readFileBytesRange, getFreeSpaceRange, getAllocatedSpaceRange } from '@/lib/ext4Range';
-import { patchExistingFileIo, createFileIo } from '@/lib/ext4PatchIo';
+import { patchExistingFileIo, createFileIo, growAndPatchFileIo } from '@/lib/ext4PatchIo';
 import { INPLACE_TOO_LARGE_MESSAGE, LARGE_PARTITION_INPLACE_NOTE, EXT4_BEST_EFFORT_NOTE } from '@/lib/exploreSession';
 import { createZip } from '@/lib/zipWriter';
 import { formatBytes } from '@/lib/binaryUtils';
@@ -299,13 +299,19 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
       }
       const alloc = await getAllocatedSpaceRange(reader, selected.inode, sb);
       const encoded = new TextEncoder().encode(content);
-      if (encoded.length > alloc) throw new Error(INPLACE_TOO_LARGE_MESSAGE);
-      const res = await patchExistingFileIo(reader, selected.inode, sb, content);
+      const res = encoded.length > alloc
+        ? await growAndPatchFileIo(reader, selected.inode, sb, content)
+        : await patchExistingFileIo(reader, selected.inode, sb, content);
       onOverlayPatched?.();
-      // Don't increment rangeRev for in-place edits (Issue #1 fix)
+      if (res.grown) setRangeRev((r) => r + 1);
       setOrigContent(content);
       setSelected({ ...selected, size: res.newSize });
-      toast({ title: 'Saved successfully', description: `${selected.path} updated in-place (${res.newSize} B)` });
+      toast({
+        title: 'Saved successfully',
+        description: res.grown
+          ? `${selected.path} grown by ${res.grown} blocks → ${res.newSize} B`
+          : `${selected.path} updated (${res.newSize} B)`,
+      });
     } catch (e) { setError(e.message || String(e)); toast({ variant: 'destructive', title: 'Save failed', description: e.message || String(e) }); }
   };
 
@@ -374,13 +380,19 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
           return;
         }
         const alloc = await getAllocatedSpaceRange(reader, selected.inode, sb);
-        if (newBytes.length > alloc) throw new Error(INPLACE_TOO_LARGE_MESSAGE);
-        const res = await patchExistingFileIo(reader, selected.inode, sb, newBytes);
+        const res = newBytes.length > alloc
+          ? await growAndPatchFileIo(reader, selected.inode, sb, newBytes)
+          : await patchExistingFileIo(reader, selected.inode, sb, newBytes);
         onOverlayPatched?.();
-        // Don't increment rangeRev for in-place edits (Issue #1 fix)
+        if (res.grown) setRangeRev((r) => r + 1);
         setSelected({ ...selected, size: res.newSize });
         setImgDirty(true);
-        toast({ title: 'Replace successful', description: `${selected.path} updated (${res.newSize} B)` });
+        toast({
+          title: 'Replace successful',
+          description: res.grown
+            ? `${selected.path} grown by ${res.grown} blocks → ${res.newSize} B`
+            : `${selected.path} updated (${res.newSize} B)`,
+        });
       } catch (e) {
         setError(e.message || String(e));
         toast({ variant: 'destructive', title: 'Replace failed', description: e.message || String(e) });
@@ -517,9 +529,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
   };
 
   const replaceFromFolder = async (fileList) => {
-    if (growWritable) {
-      if (!requireGrow()) return;
-    } else if (!requireInPlace()) return;
+    if (!requireInPlace()) return;
     setBulkBusy(true);
     let replaced = 0;
     const failed = [];
@@ -542,6 +552,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
       }
       if (replaced > 0) onPatched(next);
     } else {
+      let anyGrown = false;
       for (const file of fileList) {
         const relPath = (file.webkitRelativePath || file.name).replace(/^\//, '');
         const match = scopedRegular.find((f) => f.path.replace(/^\//, '') === relPath);
@@ -550,8 +561,12 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
         const newBytes = new Uint8Array(buf);
         try {
           const alloc = await getAllocatedSpaceRange(reader, match.inode, sb);
-          if (newBytes.length > alloc) throw new Error(INPLACE_TOO_LARGE_MESSAGE);
-          await patchExistingFileIo(reader, match.inode, sb, newBytes);
+          if (newBytes.length > alloc) {
+            const res = await growAndPatchFileIo(reader, match.inode, sb, newBytes);
+            if (res.grown) anyGrown = true;
+          } else {
+            await patchExistingFileIo(reader, match.inode, sb, newBytes);
+          }
           replaced++;
         } catch (e) {
           failed.push(`${relPath}: ${e.message}`);
@@ -559,7 +574,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
       }
       if (replaced > 0) {
         onOverlayPatched?.();
-        // Don't increment rangeRev for in-place edits (Issue #1 fix)
+        if (anyGrown) setRangeRev((r) => r + 1);
       }
     }
     toast({
@@ -601,7 +616,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
           </div>
         </div>
         {inPlaceOnly && (
-          <p className="text-[11px] text-muted-foreground mb-2">{LARGE_PARTITION_INPLACE_NOTE} {addFileWritable ? 'Delete and growing past allocated space are disabled.' : 'Add, delete, and growing past allocated space are disabled.'} {EXT4_BEST_EFFORT_NOTE}</p>
+          <p className="text-[11px] text-muted-foreground mb-2">{LARGE_PARTITION_INPLACE_NOTE} {addFileWritable ? 'Delete is disabled for large partitions.' : 'Add and delete are disabled for large partitions.'} {EXT4_BEST_EFFORT_NOTE}</p>
         )}
         {!inPlaceWritable && (
           <p className="text-[11px] text-amber-600 mb-2">{readOnlyReason || 'Read-only explore (range I/O). Extract and view work; in-place edit is disabled so the partition is not loaded into memory.'}</p>
@@ -632,10 +647,10 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
               ? (imgDirty ? `Modified · ${selected.size} B` : 'Unchanged')
               : (dirtyFile ? `Modified · ${content.length} B (orig ${origContent.length} B)` : 'Unchanged')}
           </span>
-          {content.length > allocSpace && <span className="text-rose-500 flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> Exceeds allocated block space — save will fail</span>}
+          {content.length > allocSpace && !inPlaceWritable && <span className="text-rose-500 flex items-center gap-1"><AlertTriangle className="w-3 h-3" /> Exceeds allocated block space — save will fail</span>}
         </div>
         {error && <p className="mt-2 text-xs text-rose-500">{error}</p>}
-        <p className="mt-2 text-[11px] text-muted-foreground">{isImage(selected.path) ? (imgDirty ? 'Image replaced — rebuild & download to keep the change.' : (inPlaceOnly ? `Allocated ${allocSpace} B. Replacements must fit in the file's existing allocated space.` : `Allocated ${allocSpace} B · ${formatBytes(freeSpace)} free. Larger replacements auto-grow the file allocation into free space.`)) : `Edits write back into the file's existing data blocks. Content can grow up to ${allocSpace} B (allocated block space).`}</p>
+        <p className="mt-2 text-[11px] text-muted-foreground">{isImage(selected.path) ? (imgDirty ? 'Image replaced — rebuild & download to keep the change.' : `Allocated ${allocSpace} B · ${formatBytes(freeSpace)} free. Larger replacements auto-grow the file allocation into free space.`) : `Edits write back into the file's data blocks. Larger content auto-grows the file allocation into free space.`}</p>
         {memoryWritable && <p className="mt-1 text-[11px] text-muted-foreground">{EXT4_BEST_EFFORT_NOTE}</p>}
       </div>
     );
@@ -644,7 +659,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
   return (
     <div>
       {inPlaceOnly && (
-        <p className="text-[11px] text-muted-foreground mb-2">{LARGE_PARTITION_INPLACE_NOTE} {addFileWritable ? 'Delete and growing past allocated space are disabled.' : 'Add, delete, and growing past allocated space are disabled.'} {EXT4_BEST_EFFORT_NOTE}</p>
+        <p className="text-[11px] text-muted-foreground mb-2">{LARGE_PARTITION_INPLACE_NOTE} {addFileWritable ? 'Delete is disabled for large partitions.' : 'Add and delete are disabled for large partitions.'} {EXT4_BEST_EFFORT_NOTE}</p>
       )}
       {!inPlaceWritable && (
         <p className="text-[11px] text-amber-600 mb-2">
@@ -669,7 +684,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
           <button onClick={extractAll} disabled={extracting} className="flex items-center gap-1.5 text-xs rounded-md bg-sky-600 hover:bg-sky-500 disabled:opacity-40 text-white px-2.5 py-1.5 font-medium transition-colors">
             <Archive className="w-3.5 h-3.5" /> {extracting ? 'Extracting…' : (selectedFolder ? 'Extract selected' : 'Extract all')}
           </button>
-          <button onClick={() => folderInputRef.current?.click()} disabled={!inPlaceWritable || bulkBusy} title={growWritable ? undefined : 'Folder replace only updates files that already fit in allocated space'} className="flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-40 px-2.5 py-1.5 font-medium transition-colors">
+          <button onClick={() => folderInputRef.current?.click()} disabled={!inPlaceWritable || bulkBusy} className="flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-40 px-2.5 py-1.5 font-medium transition-colors">
             <FolderInput className="w-3.5 h-3.5" /> {bulkBusy ? 'Replacing…' : (selectedFolder ? 'Replace selected' : 'Replace all')}
           </button>
           <button disabled={!addFileWritable} title={addFileWritable ? 'Add file' : 'Add file is unavailable'} onClick={() => handleAddFile(selectedFolder)} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-2.5 py-1.5 font-medium transition-colors max-w-[260px]"><FilePlus className="w-3.5 h-3.5 shrink-0" /> <span className="truncate">Add file to {selectedFolder || '/'}</span></button>

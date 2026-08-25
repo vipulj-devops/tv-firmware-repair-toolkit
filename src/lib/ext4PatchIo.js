@@ -1,5 +1,5 @@
 import { computeInPlacePatch } from './ext4.js';
-import { readInodeRange, collectExtentsRange, resolveDirInodeRange, resolveParentRange } from './ext4Range.js';
+import { readInodeRange, collectExtentsRange, resolveDirInodeRange, resolveParentRange, getFreeSpaceRange } from './ext4Range.js';
 
 function encodePatchContent(newContent) {
   if (typeof newContent === 'string') return new TextEncoder().encode(newContent);
@@ -651,4 +651,99 @@ export async function deleteFileIo(io, sb, dirPathOrPath, name) {
   await freeInodeIo(io, sb, targetInodeNum);
 
   return { freedBlocks: freed.length, name: parent.name, inode: targetInodeNum };
+}
+
+export async function growAndPatchFileIo(io, inodeNum, sb, newContent) {
+  if (!io || typeof io.read !== 'function' || typeof io.write !== 'function') {
+    throw new Error('io.read and io.write are required');
+  }
+  const inode = await readInodeRange(io, inodeNum, sb);
+  if (!isReg(inode)) throw new Error('Not a regular file');
+  const data = encodePatchContent(newContent);
+  const blockSize = sb.blockSize;
+  const origSize = inodeSizeOf(inode);
+  const neededBlocks = data.length === 0 ? 0 : Math.ceil(data.length / blockSize);
+
+  const extents = [];
+  await collectExtentsRange(io, inode.iBlock, sb, extents);
+  if (!extents.length) throw new Error('File has no extent-mapped data blocks (unsupported layout).');
+  extents.sort((a, b) => a.logical - b.logical);
+  const currentBlocks = extents.reduce((m, e) => Math.max(m, e.logical + e.len), 0);
+
+  if (neededBlocks <= currentBlocks) {
+    const res = await patchExistingFileIo(io, inodeNum, sb, data);
+    return { ...res, grown: 0 };
+  }
+
+  const extra = neededBlocks - currentBlocks;
+
+  const freeBlocksCount = Math.floor((await getFreeSpaceRange(io, sb)) / blockSize);
+  const requiredFreeHeadroom = extra + 4;
+  if (freeBlocksCount < requiredFreeHeadroom) {
+    throw new Error(`Not enough free space: need ${extra} data blocks (+ up to 4 index blocks), only ${freeBlocksCount} available.`);
+  }
+
+  const newBlocks = (await allocateBlocksIo(io, sb, extra)).slice().sort((a, b) => a - b);
+  const runs = [];
+  for (const blk of newBlocks) {
+    const last = runs[runs.length - 1];
+    if (last && last.physical + last.len === blk) last.len++;
+    else runs.push({ physical: blk, len: 1 });
+  }
+
+  let cursor = currentBlocks;
+  const newExtents = runs.map((r) => {
+    const e = { logical: cursor, physical: r.physical, len: r.len };
+    cursor += r.len;
+    return e;
+  });
+
+  const merged = [...extents, ...newExtents].sort((a, b) => a.logical - b.logical);
+  const coalesced = [];
+  for (const e of merged) {
+    const last = coalesced[coalesced.length - 1];
+    if (last && last.logical + last.len === e.logical && last.physical + last.len === e.physical) {
+      last.len += e.len;
+    } else {
+      coalesced.push({ ...e });
+    }
+  }
+
+  const perLeaf = leafMax(sb.blockSize);
+  const leafCount = Math.ceil(coalesced.length / perLeaf);
+  if (leafCount > ROOT_MAX) {
+    await freeBlocksIo(io, sb, newBlocks);
+    throw new Error(`File too fragmented to grow: need ${leafCount} leaf blocks (max ${ROOT_MAX}).`);
+  }
+
+  if (u16(inode.iBlock, 6) > 0) {
+    const oldLeaves = collectIndexLeafBlocksRange(inode.iBlock);
+    if (oldLeaves.length) await freeBlocksIo(io, sb, oldLeaves);
+  }
+
+  await buildExtentTreeIo(io, inode.offset + 0x28, sb, coalesced);
+  await writeFileDataIo(io, sb, data, coalesced);
+
+  const sizeLo = new Uint8Array(4);
+  wU32(sizeLo, 0, data.length & 0xffffffff);
+  await io.write(inode.offset + 0x04, sizeLo);
+
+  const sizeHi = new Uint8Array(4);
+  wU32(sizeHi, 0, Math.floor(data.length / 0x100000000) & 0xffffffff);
+  await io.write(inode.offset + 0x6C, sizeHi);
+
+  const sectorsPerBlock = blockSize / 512;
+  const rawInode = await io.read(inode.offset, 128);
+  const curIBlocks = u32(rawInode, 0x1C);
+  const iBlocks = new Uint8Array(4);
+  wU32(iBlocks, 0, (curIBlocks + extra * sectorsPerBlock) & 0xffffffff);
+  await io.write(inode.offset + 0x1C, iBlocks);
+
+  return {
+    origSize,
+    newSize: data.length,
+    allocatedSpace: neededBlocks * blockSize,
+    extents: coalesced.length,
+    grown: extra,
+  };
 }
