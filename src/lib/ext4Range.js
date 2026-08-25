@@ -128,6 +128,21 @@ async function listDirRange(reader, inode, sb) {
   });
 }
 
+export async function resolveDirInodeRange(reader, sb, dirPath) {
+  const parts = (dirPath || '').split('/').filter(Boolean);
+  let inodeNum = 2;
+  for (const part of parts) {
+    const inode = await readInodeRange(reader, inodeNum, sb);
+    if (!isDir(inode)) return null;
+    const entries = await listDirRange(reader, inode, sb);
+    const found = entries.find((e) => e.name === part && e.isDir);
+    if (!found) return null;
+    inodeNum = found.inode;
+  }
+  const inode = await readInodeRange(reader, inodeNum, sb);
+  return isDir(inode) ? inodeNum : null;
+}
+
 export async function listFilesRange(reader, sb, maxDepth = 8) {
   const files = [];
   const walk = async (inodeNum, path, depth) => {
