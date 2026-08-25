@@ -174,6 +174,21 @@ describe('Ext4Browser preserves existing text and image modified state', () => {
 });
 
 describe('Stage E1: Range-backed delete UI source contract', () => {
+  it('initial load uses full metadata loading state when rangeMeta is null, but refresh with existing rangeMeta keeps explorer mounted', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/Ext4Browser.jsx'), 'utf8');
+
+    // Check loading guard condition requires !rangeMeta
+    assert.ok(
+      src.includes('if (!bytes && rangeLoading && !rangeMeta)'),
+      'full loading screen should only be shown when rangeMeta does not yet exist'
+    );
+  });
+
   it('deleteSelected uses deleteFileIo in range mode and preserves memory deleteFile', async () => {
     const { readFileSync } = await import('node:fs');
     const { join, dirname } = await import('node:path');

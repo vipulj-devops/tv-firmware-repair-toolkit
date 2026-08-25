@@ -235,7 +235,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
     };
   }, [selected, bytes, sb, reader]);
 
-  if (!bytes && rangeLoading) {
+  if (!bytes && rangeLoading && !rangeMeta) {
     return <p className="text-sm text-muted-foreground p-4">Reading ext4 metadata…</p>;
   }
   if (!bytes && rangeErr) {
