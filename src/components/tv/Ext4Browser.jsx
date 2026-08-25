@@ -25,7 +25,7 @@ const detectImageType = (raw) => {
 };
 import { isExt4, parseSuperblock, listFiles, readFileBytes, patchFile, getAllocatedSpace, getFreeSpace, growAndPatchFile, deleteFile, createFile } from '@/lib/ext4';
 import { parseSuperblockRange, listFilesRange, readFileBytesRange, getFreeSpaceRange, getAllocatedSpaceRange } from '@/lib/ext4Range';
-import { patchExistingFileIo, createFileIo, growAndPatchFileIo } from '@/lib/ext4PatchIo';
+import { patchExistingFileIo, createFileIo, growAndPatchFileIo, deleteFileIo } from '@/lib/ext4PatchIo';
 import { INPLACE_TOO_LARGE_MESSAGE, LARGE_PARTITION_INPLACE_NOTE, EXT4_BEST_EFFORT_NOTE } from '@/lib/exploreSession';
 import { createZip } from '@/lib/zipWriter';
 import { formatBytes } from '@/lib/binaryUtils';
@@ -257,12 +257,12 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
     return false;
   };
 
-  const requireGrow = () => {
-    if (growWritable) return true;
+  const requireDelete = () => {
+    if (inPlaceWritable) return true;
     toast({
       variant: 'destructive',
-      title: 'Not available on large partitions',
-      description: 'Delete and growing a file past its allocated space are not supported for large partitions.',
+      title: 'Read-only explore',
+      description: readOnlyReason || 'File deletion is unavailable in read-only mode.',
     });
     return false;
   };
@@ -401,15 +401,24 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
     fileReader.readAsArrayBuffer(file);
   };
 
-  const deleteSelected = () => {
-    if (!requireGrow()) return;
+  const deleteSelected = async () => {
+    if (!requireDelete()) return;
     if (!window.confirm(`Delete "${selected.path}" from the ext4 partition? This reclaims its data blocks.`)) return;
     setError('');
     try {
-      const next = new Uint8Array(bytes);
-      deleteFile(next, selected.inode, sb, selected.path);
-      onPatched(next);
+      if (memoryWritable) {
+        const next = new Uint8Array(bytes);
+        deleteFile(next, selected.inode, sb, selected.path);
+        onPatched(next);
+        const removed = selected.path;
+        setSelected(null);
+        toast({ title: 'File deleted', description: `${removed} removed` });
+        return;
+      }
       const removed = selected.path;
+      await deleteFileIo(reader, sb, selected.path);
+      onOverlayPatched?.();
+      setRangeRev((r) => r + 1);
       setSelected(null);
       toast({ title: 'File deleted', description: `${removed} removed` });
     } catch (e) {
@@ -605,7 +614,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
             <button disabled={!inPlaceWritable} onClick={() => replaceInputRef.current?.click()} className="flex items-center gap-1.5 text-xs rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white px-3 py-1.5 font-medium transition-colors">
               <Upload className="w-3.5 h-3.5" /> Replace
             </button>
-            <button disabled={!growWritable} title={growWritable ? 'Delete file' : 'Delete is not available on large partitions'} onClick={deleteSelected} className="flex items-center gap-1.5 text-xs rounded-md bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white px-3 py-1.5 font-medium transition-colors">
+            <button disabled={!inPlaceWritable} title={inPlaceWritable ? 'Delete file' : 'Delete is unavailable in read-only mode'} onClick={deleteSelected} className="flex items-center gap-1.5 text-xs rounded-md bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white px-3 py-1.5 font-medium transition-colors">
               <Trash2 className="w-3.5 h-3.5" /> Delete
             </button>
             {!isImage(selected.path) && !isBinary && (
