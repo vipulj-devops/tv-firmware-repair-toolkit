@@ -1,5 +1,5 @@
 import { computeInPlacePatch } from './ext4.js';
-import { readInodeRange, collectExtentsRange, resolveDirInodeRange } from './ext4Range.js';
+import { readInodeRange, collectExtentsRange, resolveDirInodeRange, resolveParentRange } from './ext4Range.js';
 
 function encodePatchContent(newContent) {
   if (typeof newContent === 'string') return new TextEncoder().encode(newContent);
@@ -502,4 +502,153 @@ export async function createFileIo(io, sb, dirPath, name, content) {
 
   const totalBlocks = extents.reduce((m, e) => Math.max(m, e.logical + e.len), 0);
   return { inode: newInodeNum, name, size: data.length, blocks: totalBlocks };
+}
+
+export async function freeInodeIo(io, sb, inodeNum) {
+  const group = Math.floor((inodeNum - 1) / sb.inodesPerGroup);
+  const index = (inodeNum - 1) % sb.inodesPerGroup;
+  const descOffset = sb.gdtOffset + group * sb.descSize;
+
+  const descData = await io.read(descOffset, sb.descSize);
+  const inodeTableBlockLo = u32(descData, 0x08);
+  const inodeTableBlockHi = sb.descSize >= 64 ? u32(descData, 0x28) : 0;
+  const inodeTableBlock = inodeTableBlockLo + inodeTableBlockHi * 0x100000000;
+  const inodeOffset = inodeTableBlock * sb.blockSize + index * sb.inodeSize;
+
+  await io.write(inodeOffset, new Uint8Array(sb.inodeSize));
+
+  const bitmapBlock = bgInodeBitmapBlock(descData);
+  const bitmapOffset = bitmapBlock * sb.blockSize;
+  const byteIdx = index >> 3;
+  const mask = 1 << (index & 7);
+
+  const byteData = await io.read(bitmapOffset + byteIdx, 1);
+  byteData[0] &= ~mask;
+  await io.write(bitmapOffset + byteIdx, byteData);
+
+  const freeInodes = bgFreeInodes(descData);
+  setBgFreeInodes(descData, freeInodes + 1);
+  await io.write(descOffset, descData);
+
+  const sbData = await io.read(1024, sb.descSize >= 64 ? 352 : 264);
+  const sbFreeInodes = readSbFreeInodes(sbData);
+  setSbFreeInodes(sbData, sbFreeInodes + 1);
+  await io.write(1024, sbData);
+}
+
+export async function removeDirentIo(io, parentInodeNum, sb, name) {
+  const parentInode = await readInodeRange(io, parentInodeNum, sb);
+  if (!isDir(parentInode)) return false;
+  const extents = [];
+  await collectExtentsRange(io, parentInode.iBlock, sb, extents);
+  for (const e of extents) {
+    for (let b = 0; b < e.len; b++) {
+      const blockOff = (e.physical + b) * sb.blockSize;
+      const blockData = await io.read(blockOff, sb.blockSize);
+      let off = 0;
+      while (off + 8 <= sb.blockSize) {
+        const direntInode = u32(blockData, off);
+        const recLen = u16(blockData, off + 4);
+        const nameLen = blockData[off + 6];
+        if (recLen < 8) break;
+        if (direntInode !== 0 && nameLen === name.length) {
+          let match = true;
+          for (let i = 0; i < nameLen; i++) {
+            if (blockData[off + 8 + i] !== name.charCodeAt(i)) {
+              match = false;
+              break;
+            }
+          }
+          if (match) {
+            const zeroInode = new Uint8Array(4);
+            await io.write(blockOff + off, zeroInode);
+            return true;
+          }
+        }
+        off += recLen;
+      }
+    }
+  }
+  return false;
+}
+
+export async function deleteFileIo(io, sb, dirPathOrPath, name) {
+  let parent = null;
+  let fullPath = '';
+  if (typeof name === 'string' && name.length > 0) {
+    const dirPath = dirPathOrPath || '/';
+    const parentInodeNum = await resolveDirInodeRange(io, sb, dirPath);
+    if (!parentInodeNum) throw new Error('Could not resolve parent directory for ' + (dirPath || '/'));
+    parent = { parentInode: parentInodeNum, name };
+    fullPath = (dirPath.endsWith('/') ? dirPath : dirPath + '/') + name;
+  } else {
+    fullPath = dirPathOrPath;
+    parent = await resolveParentRange(io, sb, fullPath);
+    if (!parent) throw new Error('Could not resolve parent directory for ' + fullPath);
+  }
+
+  const parentInode = await readInodeRange(io, parent.parentInode, sb);
+  if (!isDir(parentInode)) throw new Error('Parent is not a directory');
+
+  let targetInodeNum = 0;
+  const parentExtents = [];
+  await collectExtentsRange(io, parentInode.iBlock, sb, parentExtents);
+
+  for (const e of parentExtents) {
+    for (let b = 0; b < e.len; b++) {
+      const blockOff = (e.physical + b) * sb.blockSize;
+      const blockData = await io.read(blockOff, sb.blockSize);
+      let off = 0;
+      while (off + 8 <= sb.blockSize) {
+        const direntInode = u32(blockData, off);
+        const recLen = u16(blockData, off + 4);
+        const nameLen = blockData[off + 6];
+        if (recLen < 8) break;
+        if (direntInode !== 0 && nameLen === parent.name.length) {
+          let match = true;
+          for (let i = 0; i < nameLen; i++) {
+            if (blockData[off + 8 + i] !== parent.name.charCodeAt(i)) {
+              match = false;
+              break;
+            }
+          }
+          if (match) {
+            targetInodeNum = direntInode;
+            break;
+          }
+        }
+        off += recLen;
+      }
+      if (targetInodeNum) break;
+    }
+    if (targetInodeNum) break;
+  }
+
+  if (!targetInodeNum) throw new Error('Directory entry not found for ' + fullPath);
+
+  const targetInode = await readInodeRange(io, targetInodeNum, sb);
+  if (!isReg(targetInode)) throw new Error('Only regular files can be deleted');
+
+  const freed = [];
+  const extents = [];
+  await collectExtentsRange(io, targetInode.iBlock, sb, extents);
+  for (const e of extents) {
+    for (let b = 0; b < e.len; b++) freed.push(e.physical + b);
+  }
+
+  if (u16(targetInode.iBlock, 6) > 0) {
+    const leafBlocks = collectIndexLeafBlocksRange(targetInode.iBlock);
+    for (const l of leafBlocks) freed.push(l);
+  }
+
+  const removed = await removeDirentIo(io, parent.parentInode, sb, parent.name);
+  if (!removed) throw new Error('Directory entry not found for ' + fullPath);
+
+  if (freed.length) {
+    await freeBlocksIo(io, sb, freed);
+  }
+
+  await freeInodeIo(io, sb, targetInodeNum);
+
+  return { freedBlocks: freed.length, name: parent.name, inode: targetInodeNum };
 }
