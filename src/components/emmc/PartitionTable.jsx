@@ -89,7 +89,8 @@ export default function PartitionTable({ parts, ext4Map, selected, onToggle, onT
 
   if (!parts.length) return <p className="text-sm text-muted-foreground p-4">No partitions found in this dump.</p>;
 
-  const allVisibleSelected = visible.length > 0 && visible.every((p) => selected.has(p.name));
+  const selectableVisible = visible.filter((p) => !p.unavailable);
+  const allVisibleSelected = selectableVisible.length > 0 && selectableVisible.every((p) => selected.has(p.name));
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -173,29 +174,50 @@ export default function PartitionTable({ parts, ext4Map, selected, onToggle, onT
                 const ext4 = ext4Map[p.name];
                 const fs = filesystemLabel(p, ext4Map);
                 const isSel = selected.has(p.name);
+                const declaredSize = p.declaredSize ?? p.size;
+                const availableSize = p.availableSize ?? p.size;
+                const isTruncated = !!p.truncated;
+                const isUnavailable = !!p.unavailable;
+                const sizeTitle = isTruncated
+                  ? `Declared: ${formatBytes(declaredSize)} · Available in dump: ${formatBytes(availableSize)}`
+                  : isUnavailable
+                  ? `Declared: ${formatBytes(declaredSize)} · Unavailable (0 B in dump)`
+                  : undefined;
                 return (
-                  <tr key={`${p.ptType}-${p.index}`} className={`border-b border-border/50 hover:bg-accent/30 ${isSel ? 'bg-emerald-500/5' : ''}`}>
+                  <tr key={`${p.ptType}-${p.index}`} className={`border-b border-border/50 ${isUnavailable ? 'opacity-60 bg-muted/10' : 'hover:bg-accent/30'} ${isSel ? 'bg-emerald-500/5' : ''}`}>
                     <td className="py-2 px-2">
-                      <input type="checkbox" checked={isSel} onChange={() => onToggle(p)} className="rounded" />
+                      <input type="checkbox" checked={isSel} disabled={isUnavailable} onChange={() => onToggle(p)} className="rounded disabled:opacity-40 disabled:cursor-not-allowed" />
                     </td>
                     <td className="py-2 px-2 text-muted-foreground">{p.index}</td>
                     <td className="py-2 px-2 font-mono whitespace-nowrap">{p.name}</td>
                     <td className="py-2 px-2 text-xs">
-                      <span className={`rounded px-1.5 py-0.5 font-medium ${TYPE_STYLES[p.ptType] || 'bg-muted text-muted-foreground'}`}>{typeLabel(p)}</span>
+                      <div className="flex items-center gap-1 flex-wrap">
+                        <span className={`rounded px-1.5 py-0.5 font-medium ${TYPE_STYLES[p.ptType] || 'bg-muted text-muted-foreground'}`}>{typeLabel(p)}</span>
+                        {isTruncated && (
+                          <span className="rounded px-1.5 py-0.5 font-medium text-[10px] bg-amber-500/10 text-amber-600 border border-amber-500/20" title={`Available in dump: ${formatBytes(availableSize)}`}>
+                            Partial
+                          </span>
+                        )}
+                        {isUnavailable && (
+                          <span className="rounded px-1.5 py-0.5 font-medium text-[10px] bg-muted/80 text-muted-foreground border border-border" title="Partition is beyond physical dump EOF">
+                            Unavailable
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="py-2 px-2 font-mono text-xs text-muted-foreground whitespace-nowrap">0x{p.startByte.toString(16).toUpperCase()}</td>
-                    <td className="py-2 px-2 font-mono text-xs whitespace-nowrap">{formatBytes(p.size)}</td>
+                    <td className="py-2 px-2 font-mono text-xs whitespace-nowrap" title={sizeTitle}>{formatBytes(declaredSize)}</td>
                     <td className={`py-2 px-2 font-mono text-xs whitespace-nowrap ${FS_COLORS[fs] || 'text-muted-foreground'}`}>{fs}</td>
                     <td className="py-2 px-2">
                       <div className="flex items-center gap-1.5 justify-end flex-wrap">
-                        <button type="button" onClick={() => onSave(p)} className="flex items-center gap-1 text-xs rounded-md border border-border hover:bg-accent px-2 py-1 transition-colors">
+                        <button type="button" onClick={() => onSave(p)} disabled={isUnavailable} title={isUnavailable ? 'Unavailable partition cannot be saved' : undefined} className={`flex items-center gap-1 text-xs rounded-md border border-border px-2 py-1 transition-colors ${isUnavailable ? 'opacity-40 cursor-not-allowed' : 'hover:bg-accent'}`}>
                           <Save className="w-3 h-3" /> Save
                         </button>
-                        <button type="button" onClick={() => onReplace(p)} className="flex items-center gap-1 text-xs rounded-md border border-border hover:bg-accent px-2 py-1 transition-colors">
+                        <button type="button" onClick={() => onReplace(p)} disabled={isUnavailable} title={isUnavailable ? 'Unavailable partition cannot be replaced' : undefined} className={`flex items-center gap-1 text-xs rounded-md border border-border px-2 py-1 transition-colors ${isUnavailable ? 'opacity-40 cursor-not-allowed' : 'hover:bg-accent'}`}>
                           <Upload className="w-3 h-3" /> Replace
                         </button>
                         {ext4 && (
-                          <button type="button" onClick={() => onExplore(p)} className="flex items-center gap-1 text-xs rounded-md bg-sky-600 hover:bg-sky-500 text-white px-2 py-1 transition-colors">
+                          <button type="button" onClick={() => onExplore(p)} disabled={isUnavailable} title={isUnavailable ? 'Unavailable partition cannot be explored' : undefined} className={`flex items-center gap-1 text-xs rounded-md bg-sky-600 text-white px-2 py-1 transition-colors ${isUnavailable ? 'opacity-40 cursor-not-allowed' : 'hover:bg-sky-500'}`}>
                             <FolderOpen className="w-3 h-3" /> Explore
                           </button>
                         )}

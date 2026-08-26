@@ -43,25 +43,32 @@ export async function loadExplorePartition({
   file,
   startByte,
   size,
+  availableSize = size,
+  unavailable = false,
   name = '',
   replacementBytes = null,
   existingOverlay = null,
 }) {
+  const readSize = unavailable ? 0 : (availableSize ?? size);
+  if (unavailable || readSize <= 0) {
+    throw new Error(`"${name || 'partition'}" is beyond physical dump EOF and cannot be explored.`);
+  }
+
   if (replacementBytes) {
     assertExt4(replacementBytes, name);
     return { mode: 'memory', bytes: replacementBytes, reader: null, overlay: null, readOnlyReason: null };
   }
 
-  if (size <= EXT4_EDIT_MEMORY_LIMIT) {
+  if (readSize <= EXT4_EDIT_MEMORY_LIMIT) {
     try {
-      const buf = await file.slice(startByte, startByte + size).arrayBuffer();
+      const buf = await file.slice(startByte, startByte + readSize).arrayBuffer();
       const bytes = new Uint8Array(buf);
       assertExt4(bytes, name);
       return { mode: 'memory', bytes, reader: null, overlay: null, readOnlyReason: null };
     } catch (err) {
       if (err && /does not look like ext4/i.test(err.message)) throw err;
-      const { overlay, reader } = wrapRange(file, startByte, size, existingOverlay);
-      const head = await reader.read(0, Math.min(2048, size));
+      const { overlay, reader } = wrapRange(file, startByte, readSize, existingOverlay);
+      const head = await reader.read(0, Math.min(2048, readSize));
       assertExt4(head, name);
       return {
         mode: 'range',
@@ -75,8 +82,8 @@ export async function loadExplorePartition({
     }
   }
 
-  const { overlay, reader } = wrapRange(file, startByte, size, existingOverlay);
-  const head = await reader.read(0, Math.min(2048, size));
+  const { overlay, reader } = wrapRange(file, startByte, readSize, existingOverlay);
+  const head = await reader.read(0, Math.min(2048, readSize));
   assertExt4(head, name);
   return {
     mode: 'range',

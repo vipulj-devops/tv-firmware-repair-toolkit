@@ -55,15 +55,13 @@ function parseMtdpartsEntries(spec, fileSize) {
   const tokens = spec.split(',');
   if (!tokens.length) return null;
   const parts = [];
-  const seen = new Set();
   let cursor = 0;
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
     const m = tok.match(/^((?:0x[0-9a-f]+|\d+[KMG]?|-))(?:@((?:0x[0-9a-f]+|\d+[KMG]?)))?\(([^)]+)\)(ro)?$/i);
     if (!m) return null;
     const name = m[3];
-    if (!NAME_RE.test(name) || seen.has(name)) return null;
-    seen.add(name);
+    if (!NAME_RE.test(name)) return null;
     const ro = (m[4] || '').toLowerCase() === 'ro';
     const sizeTok = parseSizeToken(m[1]);
     if (sizeTok == null) return null;
@@ -71,22 +69,34 @@ function parseMtdpartsEntries(spec, fileSize) {
       const abs = parseSizeToken(m[2]);
       if (abs == null || abs !== cursor) return null;
     }
-    let size;
+    let declaredSize;
     if (sizeTok < 0) {
       if (i !== tokens.length - 1) return null;
-      size = fileSize - cursor;
-      if (size <= 0) return null;
+      declaredSize = fileSize - cursor;
+      if (declaredSize <= 0) return null;
     } else {
-      size = sizeTok;
+      declaredSize = sizeTok;
     }
-    if (cursor < 0 || size <= 0) return null;
-    if (cursor % SECTOR !== 0 || size % SECTOR !== 0) return null;
-    if (cursor + size > fileSize) return null;
-    parts.push({ name, offset: cursor, size, ro });
-    cursor += size;
+    if (cursor < 0 || declaredSize <= 0) return null;
+    if (cursor % SECTOR !== 0 || declaredSize % SECTOR !== 0) return null;
+
+    const availableSize = Math.max(0, Math.min(declaredSize, fileSize - cursor));
+    const truncated = cursor < fileSize && cursor + declaredSize > fileSize;
+    const unavailable = cursor >= fileSize;
+
+    parts.push({
+      name,
+      offset: cursor,
+      size: declaredSize,
+      declaredSize,
+      availableSize,
+      truncated,
+      unavailable,
+      ro,
+    });
+    cursor += declaredSize;
   }
   if (!parts.length) return null;
-  if (cursor > fileSize) return null;
   return parts;
 }
 

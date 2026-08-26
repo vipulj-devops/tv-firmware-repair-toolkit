@@ -272,8 +272,11 @@ export function analyzeUserArea(bytes, fileSize) {
     default: parts = [];
   }
   for (const p of parts) {
-    if (!p.fsType) p.fsType = detectFilesystem(bytes, p.offset);
-    if (p.fsType === 'android_boot') {
+    if (!p.fsType) {
+      if (p.unavailable) p.fsType = 'raw';
+      else p.fsType = detectFilesystem(bytes, p.offset);
+    }
+    if (p.fsType === 'android_boot' && !p.unavailable) {
       const bi = parseAndroidBoot(bytes, p.offset);
       if (bi) p.bootInfo = bi;
     }
@@ -294,6 +297,10 @@ export function userAreaToParts(analysis) {
       ptType: analysis.tableType,
       startByte: p.offset,
       size: p.size,
+      declaredSize: p.declaredSize ?? p.size,
+      availableSize: p.availableSize ?? p.size,
+      truncated: !!p.truncated,
+      unavailable: !!p.unavailable,
       fsType: p.fsType || 'raw',
       vendorSource: analysis.soc,
       ro: !!p.ro,

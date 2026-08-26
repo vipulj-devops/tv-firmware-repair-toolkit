@@ -122,7 +122,9 @@ export function analyzeDump(bytes) {
 }
 
 export function readPartition(bytes, part) {
-  const end = Math.min(part.startByte + part.size, bytes.length);
+  const readSize = part.availableSize ?? part.size;
+  if (part.unavailable || readSize <= 0 || part.startByte >= bytes.length) return new Uint8Array(0);
+  const end = Math.min(part.startByte + readSize, bytes.length);
   return bytes.subarray(part.startByte, end);
 }
 

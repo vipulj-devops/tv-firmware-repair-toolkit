@@ -19,7 +19,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "test": "node --test tests/emmc1630Map.test.js tests/amlMpt.test.js tests/blkdevpartsMmc.test.js tests/userAreaRegistry.test.js tests/detectionPrecedence.test.js tests/mtdpartsEmmc.test.js tests/firmwareFamily.test.js tests/dumpPartsSelection.test.js tests/filesystemScan.test.js tests/formatFileSize.test.js tests/rangeReader.test.js tests/exploreSession.test.js tests/blockOverlay.test.js tests/ext4PatchIo.test.js tests/ext4ExploreLive.test.js tests/ext4AllocIo.test.js tests/ext4CreateInodeIo.test.js tests/ext4CreateFileIo.test.js tests/ext4DeleteFileIo.test.js tests/ext4GrowFileIo.test.js",
+    "test": "node --test tests/emmc1630Map.test.js tests/amlMpt.test.js tests/blkdevpartsMmc.test.js tests/userAreaRegistry.test.js tests/detectionPrecedence.test.js tests/mtdpartsEmmc.test.js tests/firmwareFamily.test.js tests/dumpPartsSelection.test.js tests/filesystemScan.test.js tests/formatFileSize.test.js tests/rangeReader.test.js tests/exploreSession.test.js tests/blockOverlay.test.js tests/dumpCompose.test.js tests/ext4PatchIo.test.js tests/ext4ExploreLive.test.js tests/ext4AllocIo.test.js tests/ext4CreateInodeIo.test.js tests/ext4CreateFileIo.test.js tests/ext4DeleteFileIo.test.js tests/ext4GrowFileIo.test.js",
     "build": "vite build",
     "electron": "electron .",
     "electron:build": "npm run build && electron-builder --win portable",

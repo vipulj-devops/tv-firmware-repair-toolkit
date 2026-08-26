@@ -11,6 +11,8 @@ import {
   loadExplorePartition,
 } from '../src/lib/exploreSession.js';
 import { isExt4, parseSuperblock, listFiles, readFileBytes, patchFile } from '../src/lib/ext4.js';
+import { getPartitionBlob } from '../src/lib/dumpCompose.js';
+import { readPartition } from '../src/lib/emmc.js';
 
 const dir = dirname(fileURLToPath(import.meta.url));
 
@@ -89,6 +91,7 @@ function mockDumpFile(image, { startByte = 0, onSlice, failFullSize } = {}) {
       const len = end - start;
       if (failFullSize != null && len === failFullSize) {
         return {
+          size: len,
           arrayBuffer: async () => {
             throw new RangeError('Failed to allocate ArrayBuffer');
           },
@@ -97,6 +100,7 @@ function mockDumpFile(image, { startByte = 0, onSlice, failFullSize } = {}) {
       const rel = start - startByte;
       const slice = image.subarray(Math.max(0, rel), Math.max(0, rel) + Math.min(len, image.length));
       return {
+        size: len,
         arrayBuffer: async () => toArrayBuffer(slice),
       };
     },
@@ -262,5 +266,135 @@ describe('existing wiring is preserved', () => {
     const src = readFileSync(join(dir, '../src/pages/EmmcTool.jsx'), 'utf8');
     assert.equal(/partition too large to explore/i.test(src), false);
     assert.equal(/explore supports partitions up to 1 GB/i.test(src), false);
+  });
+});
+
+describe('Phase 2B-A: Safe READ/EXTRACT handling of truncated partitions', () => {
+  it('Complete partition: extracts/reads exact declaredSize bytes', async () => {
+    const image = buildMinimalExt4();
+    const file = mockDumpFile(image, { startByte: 0 });
+    const part = {
+      name: 'system',
+      startByte: 0,
+      size: image.length,
+      declaredSize: image.length,
+      availableSize: image.length,
+      truncated: false,
+      unavailable: false,
+    };
+    const blob = getPartitionBlob({ file, partition: part });
+    assert.equal(blob.size, image.length);
+
+    const session = await loadExplorePartition({
+      file,
+      startByte: part.startByte,
+      size: part.size,
+      availableSize: part.availableSize,
+      unavailable: part.unavailable,
+      name: part.name,
+    });
+    assert.equal(session.mode, 'memory');
+    assert.equal(session.bytes.length, image.length);
+
+    const sub = readPartition(image, part);
+    assert.equal(sub.length, image.length);
+  });
+
+  it('Truncated partition: reads/extracts only availableSize bytes, never declaredSize', async () => {
+    const image = buildMinimalExt4();
+    const availableSize = 8192;
+    const declaredSize = 10 * 1024 * 1024;
+    const slices = [];
+    const file = mockDumpFile(image, { startByte: 0, onSlice: (s, e) => slices.push([s, e]) });
+    const part = {
+      name: 'userdata',
+      startByte: 0,
+      size: declaredSize,
+      declaredSize,
+      availableSize,
+      truncated: true,
+      unavailable: false,
+    };
+
+    const blob = getPartitionBlob({ file, partition: part });
+    assert.equal(blob.size, availableSize);
+
+    const session = await loadExplorePartition({
+      file,
+      startByte: part.startByte,
+      size: part.size,
+      availableSize: part.availableSize,
+      unavailable: part.unavailable,
+      name: part.name,
+    });
+    assert.equal(session.mode, 'memory');
+    assert.equal(session.bytes.length, availableSize);
+    assert.ok(slices.every((s) => s[1] <= availableSize));
+
+    const sub = readPartition(image, part);
+    assert.equal(sub.length, availableSize);
+  });
+
+  it('Unavailable partition: returns 0-byte Blob or rejects loadExplorePartition cleanly', async () => {
+    const image = buildMinimalExt4();
+    const file = mockDumpFile(image, { startByte: 0 });
+    const part = {
+      name: 'cache',
+      startByte: 0x72D00000,
+      size: 768 * 1024 * 1024,
+      declaredSize: 768 * 1024 * 1024,
+      availableSize: 0,
+      truncated: false,
+      unavailable: true,
+    };
+
+    const blob = getPartitionBlob({ file, partition: part });
+    assert.equal(blob.size, 0);
+
+    await assert.rejects(
+      () =>
+        loadExplorePartition({
+          file,
+          startByte: part.startByte,
+          size: part.size,
+          availableSize: part.availableSize,
+          unavailable: part.unavailable,
+          name: part.name,
+        }),
+      /beyond physical dump EOF/i,
+    );
+
+    const sub = readPartition(image, part);
+    assert.equal(sub.length, 0);
+  });
+
+  it('Range reader on truncated partition bounds all reads to availableSize', async () => {
+    const image = buildMinimalExt4();
+    const availableSize = EXT4_EDIT_MEMORY_LIMIT + 1;
+    const declaredSize = EXT4_EDIT_MEMORY_LIMIT + 50 * 1024 * 1024;
+    const slices = [];
+    const file = mockDumpFile(image, { startByte: 0, onSlice: (s, e) => slices.push([s, e]) });
+    const part = {
+      name: 'userdata',
+      startByte: 0,
+      size: declaredSize,
+      declaredSize,
+      availableSize,
+      truncated: true,
+      unavailable: false,
+    };
+
+    const session = await loadExplorePartition({
+      file,
+      startByte: part.startByte,
+      size: part.size,
+      availableSize: part.availableSize,
+      unavailable: part.unavailable,
+      name: part.name,
+    });
+    assert.equal(session.mode, 'range');
+    assert.ok(session.reader);
+    assert.equal(session.reader.size, availableSize);
+    assert.ok(slices.every((s) => s[1] <= availableSize));
   });
 });

@@ -170,7 +170,8 @@ export default function EmmcTool() {
     return next;
   });
   const toggleAll = (rowList = parts) => setSelected((prev) => {
-    const names = rowList.map((p) => p.name);
+    const selectable = rowList.filter((p) => !p.unavailable);
+    const names = selectable.map((p) => p.name);
     const allOn = names.length > 0 && names.every((n) => prev.has(n));
     const next = new Set(prev);
     if (allOn) names.forEach((n) => next.delete(n));
@@ -271,12 +272,13 @@ export default function EmmcTool() {
   const getPartitionBlob = (p) => composePartitionBlob({ file: file1, partition: p, replacements, overlays });
 
   const unpackAll = async () => {
-    if (!parts.length) { toast({ variant: 'destructive', title: 'No partitions', description: 'No GPT partitions found to unpack.' }); return; }
+    if (!parts.length) { toast({ variant: 'destructive', title: 'No partitions', description: 'No partitions found to unpack.' }); return; }
     setBusy(true);
     setProgress({ label: 'Unpacking partitions…', percent: 0 });
     let count = 0;
     try {
       for (const p of parts) {
+        if (p.unavailable || (p.availableSize != null && p.availableSize <= 0)) continue;
         const blob = getPartitionBlob(p);
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -325,6 +327,11 @@ export default function EmmcTool() {
   };
 
   const savePartition = (p) => {
+    const readSize = p.availableSize ?? p.size;
+    if (p.unavailable || readSize <= 0) {
+      toast({ variant: 'destructive', title: 'Save failed', description: `Partition "${p.name}" is beyond physical dump EOF and cannot be saved.` });
+      return;
+    }
     const blob = getPartitionBlob(p);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -332,7 +339,7 @@ export default function EmmcTool() {
     a.download = `${p.name}.bin`;
     a.click();
     URL.revokeObjectURL(url);
-    addLog(`Saved partition "${p.name}" (${formatBytes(p.size)})`);
+    addLog(`Saved partition "${p.name}" (${formatBytes(readSize)})${p.truncated ? ' (partial)' : ''}`);
   };
 
   const replacePartitionFile = (p, file) => {
@@ -357,6 +364,8 @@ export default function EmmcTool() {
         file: file1,
         startByte: p.startByte,
         size: p.size,
+        availableSize: p.availableSize ?? p.size,
+        unavailable: !!p.unavailable,
         name: p.name,
         replacementBytes: replacements[p.name] || null,
         existingOverlay: overlays[p.name] || null,
@@ -370,9 +379,9 @@ export default function EmmcTool() {
         setOverlays((prev) => ({ ...prev, [p.name]: session.overlay }));
       }
       if (session.mode === 'memory') {
-        addLog(`Exploring partition "${p.name}" (${formatBytes(p.size)})`);
+        addLog(`Exploring partition "${p.name}" (${formatBytes(p.availableSize ?? p.size)})`);
       } else {
-        addLog(`Exploring partition "${p.name}" (${formatBytes(p.size)}) via ranged reads`);
+        addLog(`Exploring partition "${p.name}" (${formatBytes(p.availableSize ?? p.size)}) via ranged reads`);
         if (session.memoryError) {
           toast({
             title: 'Large-partition explore',
