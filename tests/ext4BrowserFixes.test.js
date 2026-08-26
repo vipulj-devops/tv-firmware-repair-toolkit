@@ -227,3 +227,18 @@ describe('Stage E1: Range-backed delete UI source contract', () => {
       'Delete button should explain read-only restriction when disabled');
   });
 });
+
+describe('Ext4Browser UX for truncated filesystem', () => {
+  it('displays user warning when filesystem is truncated and listFiles produces no root directory entries', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/Ext4Browser.jsx'), 'utf8');
+
+    assert.ok(src.includes('const isTruncatedFs = sb && ('), 'isTruncatedFs calculation should exist');
+    assert.ok(src.includes('const isIncompleteFileSystem = !!sb && files.length === 0 && isTruncatedFs;'), 'isIncompleteFileSystem condition should exist');
+    assert.ok(src.includes('Filesystem data is incomplete in this dump. The root directory is outside the available data range.'), 'User warning text should match exact required phrasing');
+  });
+});

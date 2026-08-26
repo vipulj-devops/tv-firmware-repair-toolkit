@@ -161,6 +161,12 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
   const sb = bytes ? memSb : rangeMeta?.sb;
   const files = bytes ? memFiles : (rangeMeta?.files || []);
   const freeSpace = bytes ? memFree : (rangeMeta?.freeSpace || 0);
+  const isTruncatedFs = sb && (
+    bytes
+      ? bytes.length < sb.blocksCount * sb.blockSize
+      : (reader ? reader.size < sb.blocksCount * sb.blockSize : false)
+  );
+  const isIncompleteFileSystem = !!sb && files.length === 0 && isTruncatedFs;
   const tree = useMemo(() => buildTree(files), [files]);
   const [expanded, setExpanded] = useState({ '/': true });
   const [selected, setSelected] = useState(null);
@@ -471,7 +477,13 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
       });
     }
     if (!allFiles.length) {
-      toast({ variant: 'destructive', title: 'Nothing to extract', description: selectedFolder ? `No files found under "${selectedFolder}"` : 'No files in this partition' });
+      toast({
+        variant: 'destructive',
+        title: 'Nothing to extract',
+        description: isIncompleteFileSystem
+          ? 'Filesystem data is incomplete in this dump. The root directory is outside the available data range.'
+          : (selectedFolder ? `No files found under "${selectedFolder}"` : 'No files in this partition'),
+      });
       setExtracting(false);
       setExtractProgress(null);
       return;
@@ -711,7 +723,14 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
         onChange={(e) => { const files = Array.from(e.target.files || []); if (files.length) replaceFromFolder(files); e.target.value = ''; }} />
       <input ref={addFileInputRef} type="file" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) addFile(f); e.target.value = ''; }} />
 
-      {filter ? (
+      {isIncompleteFileSystem ? (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 text-amber-600 text-xs flex items-start gap-2 mb-3">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
+          <div>
+            <p className="font-medium">Filesystem data is incomplete in this dump. The root directory is outside the available data range.</p>
+          </div>
+        </div>
+      ) : filter ? (
         <div className="max-h-[400px] overflow-y-auto pr-1 space-y-0.5">
           {filtered.map((f) => (
             <button key={f.inode} onClick={() => setSelected(f)} className="w-full flex items-center gap-2 rounded-md hover:bg-accent/50 px-2 py-1.5 text-left">
