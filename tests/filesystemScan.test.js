@@ -88,8 +88,8 @@ describe('scanFilesystems (independent of partition tables)', () => {
 
 const SUSPECT = 'G:\\EMMC_LG32SWE-F64-P639\\EMMC_8GTF4R_USER_00000000_00E8FFFF_20251219_124500.bin';
 
-describe('LG/Realtek dump: filesystems independent of empty PT', () => {
-  it('stays Realtek / PT none / 0 parts and can still report squashfs+ext4', {
+describe('LG/Realtek dump: filesystems scanned with Realtek PART.INFO', () => {
+  it('detects Realtek PART.INFO with 62 parts and can still report squashfs+ext4', {
     skip: !existsSync(SUSPECT),
   }, () => {
     const size = statSync(SUSPECT).size;
@@ -108,8 +108,8 @@ describe('LG/Realtek dump: filesystems independent of empty PT', () => {
     });
     assert.equal(fw.family, 'Realtek');
     assert.equal(hasGpt(buf), false);
-    assert.equal(ua.tableType, 'none');
-    assert.equal(parts.length, 0);
+    assert.equal(ua.tableType, 'realtek_partinfo');
+    assert.equal(parts.length, 62);
 
     const hits = scanFilesystems(buf, size);
     const types = hits.map((h) => `${h.type}@0x${h.offset.toString(16)}`);

@@ -107,7 +107,7 @@ describe('generic descriptors are not a dump partition table', () => {
 });
 
 describe('known dumps: descriptor fallback does not steal structured maps', () => {
-  it('suspect Realtek dump: family Realtek, no dump partition table', {
+  it('suspect Realtek dump: family Realtek, parses Realtek PART.INFO table', {
     skip: !existsSync(SUSPECT),
   }, () => {
     const head = readHead(SUSPECT);
@@ -115,8 +115,8 @@ describe('known dumps: descriptor fallback does not steal structured maps', () =
     assert.equal(fw.family, 'Realtek');
     assert.match(fw.marker, /RTD284X/i);
     assert.equal(hasGpt(head.bytes), false);
-    assert.equal(ua.tableType, 'none');
-    assert.equal(parts.length, 0);
+    assert.equal(ua.tableType, 'realtek_partinfo');
+    assert.equal(parts.length, 62);
     assert.equal(parts.some((p) => p.ptType === 'vendor'), false);
   });
 

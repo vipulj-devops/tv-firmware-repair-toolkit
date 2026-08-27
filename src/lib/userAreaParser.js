@@ -265,6 +265,7 @@ export function analyzeUserArea(bytes, fileSize) {
     case 'uboot_env': parts = parseRealtek(bytes); break;
     case 'emmc_1630_5840':
     case 'aml_mpt':
+    case 'realtek_partinfo':
     case 'blkdevparts_mmc':
     case 'mtdparts_emmc':
       parts = parseRegisteredFormat(det.tableType, bytes, fileSize);

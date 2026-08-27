@@ -2,11 +2,13 @@ import { amlMptFormat } from './formats/amlMpt.js';
 import { blkdevpartsMmcFormat } from './formats/blkdevpartsMmc.js';
 import { emmc1630MapFormat } from './formats/emmc1630Map.js';
 import { mtdpartsEmmcFormat } from './formats/mtdpartsEmmc.js';
+import { realtekPartInfoFormat } from './formats/realtekPartInfo.js';
 
 // After AMLS / GPT / MSTAR / NVTK / HISILICON / Realtek / MBR. Do not reorder.
 export const USER_AREA_STRICT_FORMATS = [
   emmc1630MapFormat,
   amlMptFormat,
+  realtekPartInfoFormat,
   blkdevpartsMmcFormat,
   mtdpartsEmmcFormat,
 ];
