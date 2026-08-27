@@ -16,7 +16,9 @@ function isAmlMptEntry(bytes, recOff, fileSize) {
   if (!AML_MPT_NAME_RE.test(name)) return false;
   const size = u64le(bytes, recOff + 16);
   const offset = u64le(bytes, recOff + 24);
-  return validRange(offset, size, fileSize);
+  if (offset < 0 || size < 0 || size > 0x1000000000 || offset > 0x1000000000) return false;
+  if (fileSize && (offset > fileSize || offset + size > fileSize + SECTOR)) return false;
+  return true;
 }
 
 function isAmlMptAt(bytes, off, fileSize) {

@@ -115,15 +115,26 @@ describe('Amlogic MPT (MPT header, 40-byte entries)', () => {
     assert.equal(isAmlMpt(hugeCount, ROM1_SIZE), false);
   });
 
-  it('rejects invalid entries (empty name or zero size)', () => {
+  it('accepts MPT entries with size === 0 and preserves zero size and following offsets', () => {
+    const zeroSize = copy();
+    w64(zeroSize, 0x18 + 16, 0); // set bootloader size to 0
+    assert.equal(isAmlMpt(zeroSize, ROM1_SIZE), true);
+    const analysis = analyzeUserArea(zeroSize, ROM1_SIZE);
+    assert.equal(analysis.tableType, 'aml_mpt');
+    const bootloader = analysis.partitions.find((p) => p.name === 'bootloader');
+    assert.ok(bootloader);
+    assert.equal(bootloader.size, 0);
+    assert.equal(bootloader.offset, 0);
+    const reserved = analysis.partitions.find((p) => p.name === 'reserved');
+    assert.ok(reserved);
+    assert.equal(reserved.offset, 0x2400000);
+  });
+
+  it('rejects invalid entries (empty name or binary name)', () => {
     const emptyName = copy();
     emptyName[0x18] = 0;
     assert.equal(isAmlMpt(emptyName, ROM1_SIZE), false);
     assert.equal(detectSocUserArea(emptyName, ROM1_SIZE).tableType, 'none');
-
-    const zeroSize = copy();
-    w64(zeroSize, 0x18 + 16, 0);
-    assert.equal(isAmlMpt(zeroSize, ROM1_SIZE), false);
 
     const binaryName = copy();
     binaryName[0x18] = 0x01;
@@ -131,6 +142,74 @@ describe('Amlogic MPT (MPT header, 40-byte entries)', () => {
     binaryName[0x1a] = 0x03;
     binaryName[0x1b] = 0x04;
     assert.equal(isAmlMpt(binaryName, ROM1_SIZE), false);
+  });
+
+  it('parses T950X4 Amlogic MPT pattern fixture (29 partitions including zero-size cache)', () => {
+    const fileSize = 7818182656; // 7.281 GB
+    const buf = new Uint8Array(2048);
+    // Header
+    buf.set(new Uint8Array([0x4d, 0x50, 0x54, 0x00, 0x30, 0x31, 0x2e, 0x30, 0x30, 0x2e, 0x30, 0x30]), 0);
+    w32(buf, 0x10, 29); // 29 count
+
+    const partsDef = [
+      ['bootloader', 0, 4 * 1024 * 1024],
+      ['reserved', 0x2400000, 64 * 1024 * 1024],
+      ['cache', 0x6c00000, 0], // zero size!
+      ['env', 0x7400000, 8 * 1024 * 1024],
+      ['frp', 0x8400000, 2 * 1024 * 1024],
+      ['factory', 0x8e00000, 8 * 1024 * 1024],
+      ['vendor_boot_a', 0x9e00000, 32 * 1024 * 1024],
+      ['vendor_boot_b', 0xc600000, 32 * 1024 * 1024],
+      ['tee', 0xee00000, 32 * 1024 * 1024],
+      ['logo', 0x11600000, 8 * 1024 * 1024],
+      ['misc', 0x12600000, 2 * 1024 * 1024],
+      ['dtbo_a', 0x13000000, 2 * 1024 * 1024],
+      ['dtbo_b', 0x13a00000, 2 * 1024 * 1024],
+      ['cri_data', 0x14400000, 8 * 1024 * 1024],
+      ['param', 0x15400000, 16 * 1024 * 1024],
+      ['oem_a', 0x16c00000, 32 * 1024 * 1024],
+      ['oem_b', 0x19400000, 32 * 1024 * 1024],
+      ['boot_a', 0x1bc00000, 80 * 1024 * 1024],
+      ['boot_b', 0x21400000, 80 * 1024 * 1024],
+      ['rsv', 0x26c00000, 16 * 1024 * 1024],
+      ['metadata', 0x28400000, 16 * 1024 * 1024],
+      ['vbmeta_a', 0x29c00000, 2 * 1024 * 1024],
+      ['vbmeta_b', 0x2a600000, 2 * 1024 * 1024],
+      ['vbmeta_system_a', 0x2b000000, 2 * 1024 * 1024],
+      ['vbmeta_system_b', 0x2ba00000, 2 * 1024 * 1024],
+      ['odm_ext_a', 0x2c400000, 64 * 1024 * 1024],
+      ['odm_ext_b', 0x30c00000, 64 * 1024 * 1024],
+      ['super', 0x35400000, 2300 * 1024 * 1024],
+      ['userdata', 0xc5800000, 4296 * 1024 * 1024],
+    ];
+
+    partsDef.forEach(([name, off, sz], idx) => {
+      const e = 0x18 + idx * 40;
+      buf.set(Buffer.from(name, 'ascii'), e);
+      w64(buf, e + 16, sz);
+      w64(buf, e + 24, off);
+    });
+
+    assert.equal(isAmlMpt(buf, fileSize), true);
+    const analysis = analyzeUserArea(buf, fileSize);
+    assert.equal(analysis.tableType, 'aml_mpt');
+    assert.equal(analysis.partitions.length, 29);
+
+    const cachePart = analysis.partitions.find((p) => p.name === 'cache');
+    assert.ok(cachePart);
+    assert.equal(cachePart.size, 0);
+    assert.equal(cachePart.offset, 0x6c00000);
+
+    const userdataPart = analysis.partitions.find((p) => p.name === 'userdata');
+    assert.ok(userdataPart);
+    assert.equal(userdataPart.offset, 0xc5800000);
+
+    const mapped = userAreaToParts(analysis);
+    assert.equal(mapped.length, 29);
+    assert.equal(mapped[2].name, 'cache');
+    assert.equal(mapped[2].size, 0);
+    assert.equal(mapped[28].name, 'userdata');
+    assert.equal(mapped[28].startByte, 0xc5800000);
   });
 
   it('rejects a lone MPT magic without a valid table', () => {
