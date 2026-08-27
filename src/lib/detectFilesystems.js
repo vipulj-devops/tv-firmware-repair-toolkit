@@ -135,36 +135,75 @@ export function scanFilesystems(bytes, fileSize = 0) {
   return hits;
 }
 
-// Bounded streaming scanner that reads a File/Blob in 128 MB chunks
+export function filterBackupSuperblocks(hits) {
+  if (!Array.isArray(hits) || !hits.length) return [];
+  const sorted = [...hits].sort((a, b) => a.offset - b.offset);
+  const filtered = [];
+  for (const h of sorted) {
+    if (!filtered.some((prev) => h.offset > prev.offset && h.offset < prev.offset + prev.size)) {
+      filtered.push(h);
+    }
+  }
+  return filtered;
+}
+
+// Bounded streaming scanner that reads a File/Blob in 64 MB chunks
 // to find filesystems across multi-GB dumps without loading the full file in RAM.
-export async function scanFilesystemsAsync(file, chunkSize = 128 * 1024 * 1024) {
+// Optimized with filesystem range jumping to skip user data blocks inside detected partitions.
+// Supports optional progress and streaming hit callbacks.
+export async function scanFilesystemsAsync(
+  file,
+  chunkSize = 64 * 1024 * 1024,
+  onProgress = null,
+  onHit = null
+) {
   if (!file || !file.size) return [];
   const fileSize = file.size;
   const rawHits = [];
   const OVERLAP_MARGIN = 2048;
 
-  for (let off = 0; off < fileSize; off += chunkSize) {
+  let off = 0;
+  let lastProgressTime = 0;
+
+  while (off < fileSize) {
     const toRead = Math.min(chunkSize + OVERLAP_MARGIN, fileSize - off);
     const sliceBuf = await file.slice(off, off + toRead).arrayBuffer();
     const bytes = new Uint8Array(sliceBuf);
     const chunkHits = scanFilesystems(bytes, fileSize);
+
+    let maxJumpOffset = off + chunkSize;
+    let newHitFound = false;
+
     for (const h of chunkHits) {
       const absOff = off + h.offset;
       if (!rawHits.some((existing) => Math.abs(existing.offset - absOff) < 4096)) {
         rawHits.push({ ...h, offset: absOff });
+        newHitFound = true;
+        if (absOff + h.size > maxJumpOffset) {
+          maxJumpOffset = absOff + h.size;
+        }
       }
     }
-  }
 
-  rawHits.sort((a, b) => a.offset - b.offset);
+    off = Math.max(off + chunkSize, maxJumpOffset);
 
-  // Filter out backup superblocks that fall inside an earlier filesystem's range
-  const filtered = [];
-  for (const h of rawHits) {
-    if (!filtered.some((prev) => h.offset > prev.offset && h.offset < prev.offset + prev.size)) {
-      filtered.push(h);
+    // Stream filtered hits as they are discovered
+    if (newHitFound && onHit) {
+      const currentFiltered = filterBackupSuperblocks(rawHits);
+      onHit(currentFiltered);
+    }
+
+    // Throttled progress reporting (every ~150 ms)
+    const now = Date.now();
+    if (onProgress && (now - lastProgressTime > 150 || off >= fileSize)) {
+      lastProgressTime = now;
+      const scannedBytes = Math.min(off, fileSize);
+      const percent = Math.min(100, Math.round((scannedBytes / fileSize) * 100));
+      onProgress({ scannedBytes, totalBytes: fileSize, percent });
     }
   }
 
+  const filtered = filterBackupSuperblocks(rawHits);
+  if (onHit) onHit(filtered);
   return filtered;
 }

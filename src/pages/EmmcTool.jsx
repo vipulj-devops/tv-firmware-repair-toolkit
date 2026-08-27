@@ -114,7 +114,7 @@ export default function EmmcTool() {
     setExploreReadOnlyReason(null);
     setExploreInPlaceOnly(false);
     setBusy(true);
-    setProgress({ label: `Reading ${f.name}…`, percent: 0 });
+    setProgress({ label: `Analyzing ${f.name}…`, percent: 0 });
     try {
       const headLen = Math.min(f.size, GPT_CHUNK);
       const head = new Uint8Array(headLen);
@@ -123,7 +123,8 @@ export default function EmmcTool() {
         const end = Math.min(off + READ, headLen);
         const chunk = new Uint8Array(await f.slice(off, end).arrayBuffer());
         head.set(chunk, off);
-        setProgress({ label: `Reading ${f.name}…`, percent: Math.round((end / headLen) * 85) });
+        const headPercent = Math.round((end / headLen) * 5);
+        setProgress({ label: `Analyzing ${f.name}… ${headPercent}%`, percent: headPercent });
       }
       setGptBytes(head);
       // read the tail too — ZIP central directories live at the end of the file
@@ -134,20 +135,40 @@ export default function EmmcTool() {
       // Async scan for filesystems across full file if no GPT or strict user-area PT
       const hasGptHeader = hasGpt(head);
       const ua = analyzeUserArea(head, f.size);
-      if (!hasGptHeader && (!ua || !ua.partitions || ua.partitions.length === 0)) {
-        setProgress({ label: 'Scanning for filesystem regions…', percent: 90 });
-        const fullHits = await scanFilesystemsAsync(f);
-        if (fullHits.length > 0) {
-          setAsyncFsHits(fullHits);
-        }
-      }
 
-      setProgress({ label: 'Analyzing partition table…', percent: 100 });
       addLog(`Loaded ${f.name} (${formatBytes(f.size)})`);
-      await new Promise((r) => setTimeout(r, 250));
+
+      if (!hasGptHeader && (!ua || !ua.partitions || ua.partitions.length === 0)) {
+        setBusy(false); // Make UI interactive immediately
+
+        scanFilesystemsAsync(
+          f,
+          64 * 1024 * 1024,
+          ({ percent }) => {
+            const unifiedPercent = Math.min(100, 5 + Math.round((percent / 100) * 95));
+            setProgress({ label: `Analyzing ${f.name}… ${unifiedPercent}%`, percent: unifiedPercent });
+          },
+          (hits) => {
+            if (hits && hits.length > 0) {
+              setAsyncFsHits(hits);
+            }
+          }
+        )
+          .then(() => {
+            setProgress({ label: `Analyzing ${f.name}… 100%`, percent: 100 });
+            setTimeout(() => setProgress(null), 300);
+          })
+          .catch(() => {
+            setProgress(null);
+          });
+      } else {
+        setProgress({ label: `Analyzing ${f.name}… 100%`, percent: 100 });
+        await new Promise((r) => setTimeout(r, 200));
+        setBusy(false);
+        setProgress(null);
+      }
     } catch (e) {
       toast({ variant: 'destructive', title: 'Load failed', description: e.message });
-    } finally {
       setBusy(false);
       setProgress(null);
     }

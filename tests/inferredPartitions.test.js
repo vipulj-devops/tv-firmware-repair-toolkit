@@ -1,7 +1,7 @@
 // Unit tests for Inferred Filesystem Partition capability
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { scanFilesystems } from '../src/lib/detectFilesystems.js';
+import { scanFilesystems, scanFilesystemsAsync, filterBackupSuperblocks } from '../src/lib/detectFilesystems.js';
 import { selectDumpParts, inferredFsToParts } from '../src/lib/userArea/selectDumpParts.js';
 
 // Helper to construct a buffer with an EXT4 superblock at a given offset
@@ -94,6 +94,18 @@ describe('Inferred Filesystem Partitions', () => {
     assert.strictEqual(parts[0].size, 256 * 1024 * 1024);
   });
 
+  it('filters backup superblocks inside an earlier filesystem range', () => {
+    const rawHits = [
+      { type: 'ext4', offset: 0x294f00000, size: 4317 * 1024 * 1024, volName: 'data' },
+      { type: 'ext4', offset: 0x29ceffc00, size: 4317 * 1024 * 1024, volName: 'data' }, // backup inside range
+      { type: 'ext4', offset: 0x2aceffc00, size: 4317 * 1024 * 1024, volName: 'data' }, // backup inside range
+    ];
+
+    const filtered = filterBackupSuperblocks(rawHits);
+    assert.strictEqual(filtered.length, 1);
+    assert.strictEqual(filtered[0].offset, 0x294f00000);
+  });
+
   it('handles truncated filesystem extending beyond physical EOF', () => {
     const hits = [
       { type: 'ext4', offset: 0x00e4800000, size: 440 * 1024 * 1024, volName: 'reserved' },
@@ -152,5 +164,37 @@ describe('Inferred Filesystem Partitions', () => {
     assert.strictEqual(selected[0].inferred, true);
     assert.strictEqual(selected[1].name, 'data');
     assert.strictEqual(selected[1].ptType, 'inferred_fs');
+  });
+
+  it('scanFilesystemsAsync reports accurate progress and streams discovered hits', async () => {
+    const offset = 0x00100000;
+    const buf = createBufferWithExt4(offset, 4096, 4096, 'testvol');
+    const fileSize = buf.length;
+
+    const mockFile = {
+      size: fileSize,
+      slice: (start, end) => ({
+        arrayBuffer: async () => {
+          const sliceBuf = buf.subarray(start, Math.min(end, buf.length));
+          return sliceBuf.buffer.slice(sliceBuf.byteOffset, sliceBuf.byteOffset + sliceBuf.length);
+        },
+      }),
+    };
+
+    const progressUpdates = [];
+    const hitUpdates = [];
+
+    const result = await scanFilesystemsAsync(
+      mockFile,
+      0x100000,
+      (p) => progressUpdates.push(p),
+      (hits) => hitUpdates.push(hits)
+    );
+
+    assert.strictEqual(result.length, 1);
+    assert.strictEqual(result[0].volName, 'testvol');
+    assert.ok(progressUpdates.length > 0);
+    assert.strictEqual(progressUpdates[progressUpdates.length - 1].percent, 100);
+    assert.ok(hitUpdates.length > 0);
   });
 });
