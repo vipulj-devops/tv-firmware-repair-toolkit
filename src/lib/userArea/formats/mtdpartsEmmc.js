@@ -58,11 +58,12 @@ function parseMtdpartsEntries(spec, fileSize) {
   let cursor = 0;
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
-    const m = tok.match(/^((?:0x[0-9a-f]+|\d+[KMG]?|-))(?:@((?:0x[0-9a-f]+|\d+[KMG]?)))?\(([^)]+)\)(ro)?$/i);
+    const m = tok.match(/^((?:0x[0-9a-f]+|\d+[KMG]?|-))(?:@((?:0x[0-9a-f]+|\d+[KMG]?)))?\(([^)]+)\)(ro|enc|roenc|encro)?$/i);
     if (!m) return null;
     const name = m[3];
     if (!NAME_RE.test(name)) return null;
-    const ro = (m[4] || '').toLowerCase() === 'ro';
+    const attr = (m[4] || '').toLowerCase();
+    const ro = attr.includes('ro');
     const sizeTok = parseSizeToken(m[1]);
     if (sizeTok == null) return null;
     if (m[2] != null) {

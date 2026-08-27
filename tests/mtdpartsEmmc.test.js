@@ -70,13 +70,24 @@ describe('mtdparts_emmc (U-Boot mtdparts on eMMC)', () => {
     assert.equal(isMtdpartsEmmc(specBuf('1M(boot),-(data),1M(extra)'), fileSize), false);
   });
 
-  it('supports (name)ro and exposes ro=true', () => {
-    const parts = parseMtdpartsEmmc(specBuf('1M(system)ro,1M(data)'), 8 * MiB);
-    assert.equal(parts[0].name, 'system');
+  it('supports (name)ro, (name)enc, and combined ro/enc attributes', () => {
+    const spec = '1M(sysA)ro,8M(perm)enc,5M(kernA)roenc,65M(rtfsA)encro,1M(data)';
+    const parts = parseMtdpartsEmmc(specBuf(spec), 100 * MiB);
+    assert.equal(parts.length, 5);
+    assert.equal(parts[0].name, 'sysA');
     assert.equal(parts[0].ro, true);
+    assert.equal(parts[1].name, 'perm');
     assert.equal(parts[1].ro, false);
-    const mapped = userAreaToParts(analyzeUserArea(specBuf('1M(system)ro,1M(data)'), 8 * MiB));
+    assert.equal(parts[2].name, 'kernA');
+    assert.equal(parts[2].ro, true);
+    assert.equal(parts[3].name, 'rtfsA');
+    assert.equal(parts[3].ro, true);
+    assert.equal(parts[4].name, 'data');
+    assert.equal(parts[4].ro, false);
+    const mapped = userAreaToParts(analyzeUserArea(specBuf(spec), 100 * MiB));
     assert.equal(mapped[0].ro, true);
+    assert.equal(mapped[2].ro, true);
+    assert.equal(mapped[3].ro, true);
     assert.ok(!mapped.some((p) => /ro/i.test(p.name)));
   });
 
@@ -109,6 +120,7 @@ describe('mtdparts_emmc (U-Boot mtdparts on eMMC)', () => {
     assert.equal(isMtdpartsEmmc(Buffer.from('mtdparts=vendor-emmc:', 'latin1'), fileSize), false);
     assert.equal(isMtdpartsEmmc(Buffer.from('mtdparts=', 'latin1'), fileSize), false);
     assert.equal(isMtdpartsEmmc(specBuf('1Mboot)'), fileSize), false);
+    assert.equal(isMtdpartsEmmc(specBuf('1M(boot)invalid!'), fileSize), false);
   });
 
   it('rejects invalid names', () => {
@@ -249,6 +261,26 @@ describe('mtdparts_emmc (U-Boot mtdparts on eMMC)', () => {
     assert.equal(parts[6].truncated, true);
     assert.equal(parts[7].name, 'cache');
     assert.equal(parts[7].unavailable, true);
+  });
+
+  it('parses Sony 43-partition mtdparts map from EMMC_AUTO_2524_nw.BIN with enc attribute suffixes', () => {
+    const body = '2M(uboot),2M(uboot_env),1M(part_02),1M(part_03),1M(eepromA),8M(perm)enc,1M(ci),1M(hdmi),1M(wfdp),5M(kernelA)enc,5M(kernelB)enc,65M(rootfsA)enc,65M(rootfsB)enc,1M(basic),200M(3rd_rw)enc,300M(upgrade)enc,168M(3rd_ro)enc,1M(channelA),1M(channelB),30M(pqa),30M(pqb),5M(aqa),5M(aqb),1M(panel),1M(edid),1M(svc),1M(ddb),1M(epg),1M(bechip),1M(pqeepback),6M(part_30),6M(part_31),1M(spsA),1M(spsB),1M(fdat),2M(spdA),2M(spdB),5M(spcA),5M(spcB),1M(fnvm),692M(cach),20M(reserved),128M(warm)';
+    const fileSize = 1979711488; // 1.844 GB physical dump size
+    const det = detectSocUserArea(specBuf(body, 'mt53xx-emmc'), fileSize);
+    assert.equal(det.tableType, 'mtdparts_emmc');
+    const parts = parseMtdpartsEmmc(specBuf(body, 'mt53xx-emmc'), fileSize);
+    assert.equal(parts.length, 43);
+    assert.equal(parts[0].name, 'uboot');
+    assert.equal(parts[0].offset, 0);
+    assert.equal(parts[5].name, 'perm');
+    assert.equal(parts[5].offset, 7340032); // 7 MB
+    assert.equal(parts[9].name, 'kernelA');
+    assert.equal(parts[9].offset, 18874368); // 18 MB
+    assert.equal(parts[11].name, 'rootfsA');
+    assert.equal(parts[11].offset, 29360128); // 28 MB
+    assert.equal(parts[42].name, 'warm');
+    assert.equal(parts[42].offset, 1728053248);
+    assert.ok(parts.every((p) => !p.unavailable && !p.truncated));
   });
 
   it('logical cursor continues by DECLARED size after a truncated partition', () => {
