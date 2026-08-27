@@ -17,7 +17,7 @@ import { formatBytes } from '@/lib/binaryUtils';
 import { isExt4 } from '@/lib/ext4';
 import { loadExplorePartition } from '@/lib/exploreSession';
 import { composeDumpBlob, getPartitionBlob as composePartitionBlob } from '@/lib/dumpCompose';
-import { scanFilesystems } from '@/lib/detectFilesystems';
+import { scanFilesystems, scanFilesystemsAsync } from '@/lib/detectFilesystems';
 import { crc32Init, crc32Update, crc32Final } from '@/lib/crc32';
 import { toast } from '@/components/ui/use-toast';
 import { Progress } from '@/components/ui/progress';
@@ -32,6 +32,7 @@ export default function EmmcTool() {
   const [replacements, setReplacements] = useState({}); // { partitionName: Uint8Array }
   const [overlays, setOverlays] = useState({}); // { partitionName: overlay }
   const [overlayTick, setOverlayTick] = useState(0);
+  const [asyncFsHits, setAsyncFsHits] = useState([]);
   const [ext4Map, setExt4Map] = useState({});
   const [log, setLog] = useState([]);
   const [explorePart, setExplorePart] = useState(null);
@@ -57,12 +58,18 @@ export default function EmmcTool() {
     () => (gptBytes ? scanFilesystems(gptBytes, file1?.size || gptBytes.length) : []),
     [gptBytes, file1],
   );
+  const effectiveFsHits = useMemo(
+    () => (asyncFsHits.length > 0 ? asyncFsHits : filesystemHits),
+    [asyncFsHits, filesystemHits],
+  );
   const parts = useMemo(() => selectDumpParts({
     hasGpt: gptFound,
     gptParts,
     userAreaAnalysis,
     firmwareParts: firmwareAnalysis ? firmwarePartitionsToParts(firmwareAnalysis, file1?.size || 0) : [],
-  }), [gptFound, gptParts, userAreaAnalysis, firmwareAnalysis, file1]);
+    filesystemHits: effectiveFsHits,
+    fileSize: file1?.size || 0,
+  }), [gptFound, gptParts, userAreaAnalysis, firmwareAnalysis, effectiveFsHits, file1]);
   const overlayDirty = Object.values(overlays).some((o) => o && o.hasWrites());
   const dirty = overlayTick >= 0 && (Object.keys(replacements).length > 0 || overlayDirty);
 
@@ -100,6 +107,7 @@ export default function EmmcTool() {
     setReplacements({});
     setOverlays({});
     setOverlayTick(0);
+    setAsyncFsHits([]);
     setExplorePart(null);
     setExploreBytes(null);
     setExploreReader(null);
@@ -122,6 +130,18 @@ export default function EmmcTool() {
       const tailStart = Math.max(0, f.size - TAIL_CHUNK);
       const tail = new Uint8Array(await f.slice(tailStart, f.size).arrayBuffer());
       setTailBytes(tail);
+
+      // Async scan for filesystems across full file if no GPT or strict user-area PT
+      const hasGptHeader = hasGpt(head);
+      const ua = analyzeUserArea(head, f.size);
+      if (!hasGptHeader && (!ua || !ua.partitions || ua.partitions.length === 0)) {
+        setProgress({ label: 'Scanning for filesystem regions…', percent: 90 });
+        const fullHits = await scanFilesystemsAsync(f);
+        if (fullHits.length > 0) {
+          setAsyncFsHits(fullHits);
+        }
+      }
+
       setProgress({ label: 'Analyzing partition table…', percent: 100 });
       addLog(`Loaded ${f.name} (${formatBytes(f.size)})`);
       await new Promise((r) => setTimeout(r, 250));
@@ -137,6 +157,7 @@ export default function EmmcTool() {
     setFile1(null);
     setGptBytes(null);
     setTailBytes(null);
+    setAsyncFsHits([]);
     setReplacements({});
     setOverlays({});
     setOverlayTick(0);

@@ -7,6 +7,7 @@ function u16(b, o) { return b[o] | (b[o + 1] << 8); }
 function u32(b, o) { return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0; }
 function u64(b, o) { return u32(b, o) + u32(b, o + 4) * 0x100000000; }
 
+const SECTOR = 512;
 const HSQS = [0x68, 0x73, 0x71, 0x73]; // "hsqs"
 const EXT_MAGIC = 0xef53;
 const SQUASH_HDR = 96;
@@ -56,7 +57,7 @@ function parseSquashfs(bytes, offset, fileSize) {
 
 function parseExt4At(bytes, fsStart, fileSize) {
   if (fsStart < 0 || fsStart + 2048 > bytes.length) return null;
-  if (fsStart % 512 !== 0) return null;
+  if (fsStart % SECTOR !== 0) return null;
   const sb = fsStart + 1024;
   if (u16(bytes, sb + 0x38) !== EXT_MAGIC) return null;
   const logBlockSize = u32(bytes, sb + 0x18);
@@ -79,12 +80,23 @@ function parseExt4At(bytes, fsStart, fileSize) {
   const size = blocksCount * blockSize;
   if (size < 2048) return null;
   if (fileSize && fsStart + Math.min(size, 2048) > fileSize && fsStart >= fileSize) return null;
+
+  // Extract volume name (16 bytes ASCII at sb + 120)
+  let volName = '';
+  const volOff = sb + 120;
+  for (let i = 0; i < 16; i++) {
+    const c = bytes[volOff + i];
+    if (c >= 32 && c <= 126) volName += String.fromCharCode(c);
+  }
+  volName = volName.trim();
+
   return {
     type: 'ext4',
     offset: fsStart,
     size,
     blockSize,
     blocksCount,
+    volName,
   };
 }
 
@@ -100,16 +112,16 @@ function findSquashfs(bytes, fileSize, hits) {
 }
 
 function findExt4(bytes, fileSize, hits) {
-  const needle = [0x53, 0xef];
-  let from = 0;
-  while (from + 2 <= bytes.length) {
-    const i = indexOfBytes(bytes, needle, from);
-    if (i < 0) break;
-    if ((i % 512) === 56) {
-      const rec = parseExt4At(bytes, i - 1080, fileSize);
-      if (rec && !overlaps(hits, rec.offset, Math.min(rec.size, 0x100000))) hits.push(rec);
+  const minLen = 2048;
+  if (bytes.length < minLen) return;
+  const maxSec = bytes.length - minLen;
+  for (let sec = 0; sec <= maxSec; sec += SECTOR) {
+    if (bytes[sec + 1080] === 0x53 && bytes[sec + 1081] === 0xef) {
+      const rec = parseExt4At(bytes, sec, fileSize);
+      if (rec && !overlaps(hits, rec.offset, Math.min(rec.size, 0x100000))) {
+        hits.push(rec);
+      }
     }
-    from = i + 2;
   }
 }
 
@@ -121,4 +133,38 @@ export function scanFilesystems(bytes, fileSize = 0) {
   findExt4(bytes, limit, hits);
   hits.sort((a, b) => a.offset - b.offset);
   return hits;
+}
+
+// Bounded streaming scanner that reads a File/Blob in 128 MB chunks
+// to find filesystems across multi-GB dumps without loading the full file in RAM.
+export async function scanFilesystemsAsync(file, chunkSize = 128 * 1024 * 1024) {
+  if (!file || !file.size) return [];
+  const fileSize = file.size;
+  const rawHits = [];
+  const OVERLAP_MARGIN = 2048;
+
+  for (let off = 0; off < fileSize; off += chunkSize) {
+    const toRead = Math.min(chunkSize + OVERLAP_MARGIN, fileSize - off);
+    const sliceBuf = await file.slice(off, off + toRead).arrayBuffer();
+    const bytes = new Uint8Array(sliceBuf);
+    const chunkHits = scanFilesystems(bytes, fileSize);
+    for (const h of chunkHits) {
+      const absOff = off + h.offset;
+      if (!rawHits.some((existing) => Math.abs(existing.offset - absOff) < 4096)) {
+        rawHits.push({ ...h, offset: absOff });
+      }
+    }
+  }
+
+  rawHits.sort((a, b) => a.offset - b.offset);
+
+  // Filter out backup superblocks that fall inside an earlier filesystem's range
+  const filtered = [];
+  for (const h of rawHits) {
+    if (!filtered.some((prev) => h.offset > prev.offset && h.offset < prev.offset + prev.size)) {
+      filtered.push(h);
+    }
+  }
+
+  return filtered;
 }

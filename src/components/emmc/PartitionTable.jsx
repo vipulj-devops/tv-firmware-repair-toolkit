@@ -12,6 +12,8 @@ const TYPE_STYLES = {
   'vendor': 'bg-teal-500/10 text-teal-600',
   'mtdparts_emmc': 'bg-cyan-500/10 text-cyan-700',
   'blkdevparts_mmc': 'bg-teal-500/10 text-teal-700',
+  'realtek_partinfo': 'bg-sky-500/10 text-sky-700',
+  'inferred_fs': 'bg-amber-500/10 text-amber-700 border border-amber-500/20',
 };
 
 const FS_COLORS = {
@@ -36,8 +38,10 @@ function typeLabel(p) {
   if (p.ptType === 'vendor') return 'VENDOR';
   if (p.ptType === 'emmc_1630_5840') return 'eMMC 0x1630/0x5840 Map';
   if (p.ptType === 'aml_mpt') return 'Amlogic MPT';
+  if (p.ptType === 'realtek_partinfo') return 'PART.INFO';
   if (p.ptType === 'blkdevparts_mmc') return 'blkdevparts';
   if (p.ptType === 'mtdparts_emmc') return 'mtdparts';
+  if (p.ptType === 'inferred_fs') return 'Inferred FS';
   if (p.ptType === 'emmc-hw') return 'HW';
   return 'HW';
 }
