@@ -1,5 +1,5 @@
 // Realtek PART.INFO binary partition table format
-// Primary table at offset 0x00100000, backup at 0x00140000
+// Primary table at offset 0x00100000 or 0x00500000, backup at 0x00140000 or 0x00540000
 // Each entry is 96 bytes (0x60)
 // Fields:
 //   +0x00: name[32] (ASCII, null-terminated)
@@ -42,13 +42,17 @@ export function isRealtekPartInfoAt(bytes, off, fileSize) {
   const totalSize = u64le(bytes, off + 0x30);
   if (totalSize === 0) return false;
   if (!isRealtekPartInfoEntry(bytes, off + HEADER_SIZE)) return false;
-  const firstName = ascii(bytes, off + HEADER_SIZE, 32);
-  if (firstName !== PARTINFO_ENTRY_NAME && firstName !== MAPBAK_ENTRY_NAME) {
-    const secondName = ascii(bytes, off + HEADER_SIZE + ENTRY_SIZE, 32);
-    if (secondName !== PARTINFO_ENTRY_NAME && secondName !== MAPBAK_ENTRY_NAME) {
-      return false;
+
+  let foundTableMarker = false;
+  for (let i = 0; i < Math.min(4, maxParts); i++) {
+    const entryName = ascii(bytes, off + HEADER_SIZE + i * ENTRY_SIZE, 32);
+    if (entryName === PARTINFO_ENTRY_NAME || entryName === MAPBAK_ENTRY_NAME) {
+      foundTableMarker = true;
+      break;
     }
   }
+  if (!foundTableMarker) return false;
+
   return true;
 }
 
