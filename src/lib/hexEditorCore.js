@@ -221,3 +221,72 @@ export function createModifiedCounter() {
     clear() { count = 0; },
   };
 }
+
+export function parseSearchPattern(input, mode = 'hex') {
+  if (input == null) return { ok: false, error: 'No input provided.', needle: null };
+  const trimmed = String(input).trim();
+  if (trimmed === '') return { ok: false, error: 'Please enter a search pattern.', needle: null };
+
+  if (mode === 'hex') {
+    // Strip whitespace and optional 0x/0X prefix
+    let clean = trimmed.replace(/\s+/g, '');
+    if (/^0[xX]/.test(clean)) clean = clean.slice(2);
+    clean = clean.replace(/[^0-9a-fA-F]/g, '');
+    if (clean.length === 0) return { ok: false, error: 'Invalid hex pattern.', needle: null };
+    if (clean.length % 2 !== 0) return { ok: false, error: 'Hex pattern must have an even number of digits.', needle: null };
+    const needle = new Uint8Array(clean.length / 2);
+    for (let i = 0; i < needle.length; i++) {
+      needle[i] = parseInt(clean.substr(i * 2, 2), 16);
+    }
+    return { ok: true, error: null, needle, mode: 'hex' };
+  }
+
+  // ASCII mode
+  const needle = new Uint8Array(trimmed.length);
+  for (let i = 0; i < trimmed.length; i++) {
+    needle[i] = trimmed.charCodeAt(i) & 0xff;
+  }
+  return { ok: true, error: null, needle, mode: 'ascii' };
+}
+
+export function findNextMatch(haystack, needle, start = 0) {
+  if (!haystack || !needle || needle.length === 0) return -1;
+  if (needle.length > haystack.length) return -1;
+  const end = haystack.length - needle.length;
+  for (let i = Math.max(0, start); i <= end; i++) {
+    let ok = true;
+    for (let j = 0; j < needle.length; j++) {
+      if (haystack[i + j] !== needle[j]) { ok = false; break; }
+    }
+    if (ok) return i;
+  }
+  return -1;
+}
+
+export function findPreviousMatch(haystack, needle, start = -1) {
+  if (!haystack || !needle || needle.length === 0) return -1;
+  if (needle.length > haystack.length) return -1;
+  const end = haystack.length - needle.length;
+  if (start < 0 || start > end) start = end;
+  for (let i = Math.min(start, end); i >= 0; i--) {
+    let ok = true;
+    for (let j = 0; j < needle.length; j++) {
+      if (haystack[i + j] !== needle[j]) { ok = false; break; }
+    }
+    if (ok) return i;
+  }
+  return -1;
+}
+
+export function findAllMatches(haystack, needle) {
+  if (!haystack || !needle || needle.length === 0) return [];
+  const results = [];
+  let from = 0;
+  while (true) {
+    const idx = findNextMatch(haystack, needle, from);
+    if (idx === -1) break;
+    results.push(idx);
+    from = idx + 1;
+  }
+  return results;
+}

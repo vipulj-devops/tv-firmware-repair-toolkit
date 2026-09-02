@@ -15,6 +15,10 @@ import {
   formatByteValue,
   formatSelectionSize,
   createModifiedCounter,
+  parseSearchPattern,
+  findNextMatch,
+  findPreviousMatch,
+  findAllMatches,
 } from '@/lib/hexEditorCore';
 
 const ROW_BYTES = 16;
@@ -23,9 +27,12 @@ const ROW_HEIGHT = 22; // px
 export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highlight, onSave }) {
   const [copied, setCopied] = useState(null);
   const [query, setQuery] = useState('');
+  const [searchMode, setSearchMode] = useState('hex'); // 'hex' | 'ascii'
   const [matches, setMatches] = useState([]);
   const [matchIdx, setMatchIdx] = useState(-1);
   const [needleLen, setNeedleLen] = useState(0);
+  const [searchError, setSearchError] = useState(null);
+  const [lastParsedPattern, setLastParsedPattern] = useState(null);
 
   // Go To Offset
   const [gotoInput, setGotoInput] = useState('');
@@ -109,29 +116,40 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
   }, []);
 
   // Search logic
-  useEffect(() => {
-    const q = query.trim();
-    if (!q || !bytes || !bytes.length) { setMatches([]); setMatchIdx(-1); setNeedleLen(0); return; }
-    const hexClean = q.replace(/[^0-9a-fA-F]/g, '');
-    let needle;
-    if (/^[0-9a-fA-F\s]+$/.test(q) && hexClean.length >= 2 && hexClean.length % 2 === 0) {
-      needle = new Uint8Array(hexClean.length / 2);
-      for (let i = 0; i < needle.length; i++) needle[i] = parseInt(hexClean.substr(i * 2, 2), 16);
-    } else {
-      needle = new Uint8Array(q.length);
-      for (let i = 0; i < q.length; i++) needle[i] = q.charCodeAt(i) & 0xff;
-    }
-    const found = [];
-    for (let i = 0; i + needle.length <= bytes.length; i++) {
-      let ok = true;
-      for (let j = 0; j < needle.length; j++) { if (bytes[i + j] !== needle[j]) { ok = false; break; } }
-      if (ok) found.push(i);
-    }
-    setMatches(found);
-    setNeedleLen(needle.length);
-    setMatchIdx(found.length ? 0 : -1);
-  }, [query, bytes]);
+  // Cache the parsed needle and last-searched buffer to avoid redundant full scans.
+  const lastMatchesRef = useRef([]);
 
+  // When bytes change (edit/undo/redo/reload) or query/mode changes, invalidate cached matches
+  useEffect(() => {
+    lastMatchesRef.current = [];
+    setMatches([]);
+    setMatchIdx(-1);
+
+    // If there's no active query, just clear and return
+    const q = query.trim();
+    if (!q || !bytes || !bytes.length) {
+      setNeedleLen(0);
+      setSearchError(null);
+      setLastParsedPattern(null);
+      return;
+    }
+    // Validate the pattern but do NOT run findAllMatches on every keystroke.
+    // Full results are computed lazily when Find Next/Previous is invoked.
+    const parsed = parseSearchPattern(q, searchMode);
+    if (!parsed.ok) {
+      setNeedleLen(0);
+      setMatches([]);
+      setMatchIdx(-1);
+      setSearchError(parsed.error);
+      setLastParsedPattern(null);
+      return;
+    }
+    setSearchError(null);
+    setNeedleLen(parsed.needle.length);
+    setLastParsedPattern(parsed);
+  }, [query, searchMode, bytes]);
+
+  // When matchIdx changes (via Find Next/Previous), scroll to it
   useEffect(() => {
     if (matchIdx >= 0 && matches[matchIdx] != null && scrollRef.current) {
       const row = Math.floor(matches[matchIdx] / ROW_BYTES);
@@ -141,9 +159,25 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
     }
   }, [matchIdx, matches, viewportH]);
 
+  // All match ranges (for highlighting every match, not just the current one)
+  const allMatchRanges = useMemo(() => {
+    if (!needleLen || !matches.length) return [];
+    return matches.map((start) => ({ start, end: start + needleLen - 1 }));
+  }, [matches, needleLen]);
+
   const matchRange = matchIdx >= 0 && matches[matchIdx] != null
-    ? { start: matches[matchIdx], end: matches[matchIdx] + needleLen }
+    ? { start: matches[matchIdx], end: matches[matchIdx] + needleLen - 1 }
     : null;
+
+  // Check if an index is within the current (active) match
+  const isCurrentMatch = (idx) => {
+    return matchRange && idx >= matchRange.start && idx <= matchRange.end;
+  };
+
+  // Check if an index is within any match (for secondary highlighting)
+  const isInAnyMatch = (idx) => {
+    return allMatchRanges.some((r) => idx >= r.start && idx <= r.end);
+  };
 
   // Auto-scroll active cursor into view
   useEffect(() => {
@@ -236,7 +270,99 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
       } else if (targetTop + ROW_HEIGHT > container.scrollTop + container.clientHeight) {
         container.scrollTop = targetTop + ROW_HEIGHT - container.clientHeight;
       }
+     }
+   };
+
+  const scrollToIndex = (idx) => {
+    if (!scrollRef.current) return;
+    const row = Math.floor(idx / ROW_BYTES);
+    const targetTop = row * ROW_HEIGHT;
+    const container = scrollRef.current;
+    if (targetTop < container.scrollTop) {
+      container.scrollTop = targetTop;
+    } else if (targetTop + ROW_HEIGHT > container.scrollTop + container.clientHeight) {
+      container.scrollTop = targetTop + ROW_HEIGHT - container.clientHeight;
     }
+  };
+
+  const doFind = (direction) => {
+    if (!bytes || bytes.length === 0) return;
+    const parsed = lastParsedPattern;
+    if (!parsed || !parsed.ok) {
+      const fresh = parseSearchPattern(query, searchMode);
+      if (!fresh.ok) { setSearchError(fresh.error); return; }
+      setSearchError(null);
+      const found = findAllMatches(bytes, fresh.needle);
+      setMatches(found);
+      setNeedleLen(fresh.needle.length);
+      if (found.length === 0) { setMatchIdx(-1); setSearchError('No matches found.'); return; }
+      // For initial search, start from cursor position
+      let idx = direction === 'next'
+        ? findNextMatch(bytes, fresh.needle, cursorIndex)
+        : findPreviousMatch(bytes, fresh.needle, cursorIndex - 1);
+      if (idx === -1) {
+        // Wrap around
+        idx = direction === 'next'
+          ? findNextMatch(bytes, fresh.needle, 0)
+          : findPreviousMatch(bytes, fresh.needle, bytes.length - fresh.needle.length);
+      }
+      if (idx === -1) { setMatchIdx(-1); setSearchError('No matches found.'); return; }
+      const newIdx = found.indexOf(idx);
+      setMatchIdx(newIdx >= 0 ? newIdx : 0);
+      setCursorIndex(idx);
+      setAnchorIndex(idx);
+      scrollToIndex(idx);
+      return;
+    }
+
+    const needle = parsed.needle;
+    // Calculate search start: skip past current match for 'next', start before cursor for 'previous'
+    let searchStart;
+    if (direction === 'next') {
+      // Start search from current cursor; if cursor is at a match, start from end of match
+      const currentMatchStart = matches[matchIdx];
+      searchStart = (matchIdx >= 0 && currentMatchStart != null)
+        ? Math.min(currentMatchStart + needle.length, cursorIndex + needle.length)
+        : cursorIndex;
+    } else {
+      // Start search before current cursor position
+      searchStart = cursorIndex - 1;
+    }
+
+    let idx = direction === 'next'
+      ? findNextMatch(bytes, needle, searchStart)
+      : findPreviousMatch(bytes, needle, searchStart);
+    if (idx === -1) {
+      // Wrap around
+      idx = direction === 'next'
+        ? findNextMatch(bytes, needle, 0)
+        : findPreviousMatch(bytes, needle, bytes.length - needle.length);
+    }
+    if (idx === -1) {
+      setSearchError('No matches found.');
+      return;
+    }
+    setNeedleLen(needle.length);
+    const allMatches = matches.length ? matches : findAllMatches(bytes, needle);
+    setMatches(allMatches);
+    const newIdx = allMatches.indexOf(idx);
+    setMatchIdx(newIdx >= 0 ? newIdx : 0);
+    setCursorIndex(idx);
+    setAnchorIndex(idx);
+    scrollToIndex(idx);
+  };
+
+  const handleFindNext = () => doFind('next');
+  const handleFindPrevious = () => doFind('previous');
+
+  const handleClearSearch = () => {
+    setQuery('');
+    setMatches([]);
+    setMatchIdx(-1);
+    setNeedleLen(0);
+    setSearchError(null);
+    setLastParsedPattern(null);
+    lastMatchesRef.current = [];
   };
 
   // Byte selection click handler
@@ -275,6 +401,12 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
     if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) {
       e.preventDefault();
       handleRedo();
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'g' || e.key === 'G')) {
+      e.preventDefault();
+      if (e.shiftKey) handleFindPrevious();
+      else handleFindNext();
       return;
     }
 
@@ -382,8 +514,9 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
           <Search className="w-3 h-3 text-muted-foreground absolute left-2 top-1/2 -translate-y-1/2" />
           <input
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search hex (e.g. 4E 50) or ASCII text…"
+            onChange={(e) => { setQuery(e.target.value); setSearchError(null); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleFindNext(); } }}
+            placeholder={searchMode === 'hex' ? "Search hex (e.g. 4E 4F 4E 45)…" : "Search ASCII text…"}
             className="w-full rounded-md border border-input bg-background pl-7 pr-6 py-1 text-xs outline-none focus:ring-2 focus:ring-emerald-500/40"
           />
           {query && (
@@ -392,23 +525,53 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
             </button>
           )}
         </div>
+        <div className="flex items-center gap-0.5 text-xs">
+          <button
+            onClick={() => setSearchMode('hex')}
+            className={`px-2 py-1 rounded-l-md border border-border text-xs font-medium transition-colors ${searchMode === 'hex' ? 'bg-emerald-600 text-white' : 'hover:bg-accent'}`}
+          >
+            HEX
+          </button>
+          <button
+            onClick={() => setSearchMode('ascii')}
+            className={`px-2 py-1 rounded-r-md border border-border text-xs font-medium transition-colors ${searchMode === 'ascii' ? 'bg-emerald-600 text-white' : 'hover:bg-accent'}`}
+          >
+            ASCII
+          </button>
+        </div>
         <button
-          onClick={() => setMatchIdx((i) => (matches.length ? (i - 1 + matches.length) % matches.length : -1))}
-          disabled={!matches.length}
+          onClick={handleFindPrevious}
+          disabled={!query}
+          title="Find previous (Ctrl+Shift+G)"
           className="flex items-center gap-1 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-40 px-2 py-1"
         >
           <ChevronUp className="w-3 h-3" />
         </button>
         <button
-          onClick={() => setMatchIdx((i) => (matches.length ? (i + 1) % matches.length : -1))}
-          disabled={!matches.length}
+          onClick={handleFindNext}
+          disabled={!query}
+          title="Find next (Ctrl+G)"
           className="flex items-center gap-1 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-40 px-2 py-1"
         >
           <ChevronDown className="w-3 h-3" />
         </button>
         <span className="text-[11px] text-muted-foreground shrink-0 w-16 text-right font-mono">
-          {query ? (matches.length ? `${matchIdx + 1}/${matches.length}` : '0/0') : ''}
+          {query && !searchError ? (matches.length ? `${matchIdx + 1}/${matches.length}` : '0/0') : ''}
         </span>
+        {query && (
+          <button
+            onClick={handleClearSearch}
+            title="Clear search"
+            className="flex items-center justify-center text-muted-foreground hover:text-foreground w-5 h-5 rounded hover:bg-accent"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        )}
+        {searchError && (
+          <span className="text-[10px] text-rose-500 max-w-xs truncate" title={searchError}>
+            {searchError}
+          </span>
+        )}
         <div className="h-4 w-px bg-border mx-1" />
         <span className="text-[11px] text-muted-foreground shrink-0">Go To:</span>
         <div className="relative">
@@ -469,7 +632,8 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
                       const isSelected = isIndexSelected(idx, anchorIndex, cursorIndex);
                       const isCursor = idx === cursorIndex;
                       const isModified = origBytesRef.current && bytes[idx] !== origBytesRef.current[idx];
-                      const inMatch = matchRange && idx >= matchRange.start && idx < matchRange.end;
+                      const isCurrentMatchIdx = isCurrentMatch(idx);
+                      const inMatch = !isCurrentMatchIdx && isInAnyMatch(idx);
                       const isCrcHighlight = highlight === idx;
 
                       const valHex = isCursor && hexNibble ? (hexNibble + '_') : toHex(bytes[idx], 2);
@@ -479,15 +643,17 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
                           key={idx}
                           onClick={(e) => handleCellClick(idx, 'hex', e)}
                           title={`Offset: 0x${toHex(idx, 8)} (${idx})\nHex: 0x${toHex(bytes[idx], 2)}\nASCII: ${bytes[idx] >= 32 && bytes[idx] <= 126 ? String.fromCharCode(bytes[idx]) : '.'}${isModified ? '\n[MODIFIED]' : ''}`}
-                          className={`inline-block w-[1.7em] text-center cursor-pointer rounded px-0.5 mx-[1px] transition-colors ${
-                            isSelected
-                              ? 'bg-emerald-600 text-white font-medium'
-                              : inMatch
-                              ? 'bg-amber-400 text-black'
-                              : isCrcHighlight
-                              ? 'bg-emerald-500/20 text-emerald-600'
-                              : 'hover:bg-accent'
-                          } ${
+                           className={`inline-block w-[1.7em] text-center cursor-pointer rounded px-0.5 mx-[1px] transition-colors ${
+                             isSelected
+                               ? 'bg-emerald-600 text-white font-medium'
+                               : isCurrentMatchIdx
+                               ? 'bg-emerald-400 text-black'
+                               : inMatch
+                               ? 'bg-amber-400 text-black'
+                               : isCrcHighlight
+                               ? 'bg-emerald-500/20 text-emerald-600'
+                               : 'hover:bg-accent'
+                           } ${
                             isCursor && activePane === 'hex'
                               ? 'ring-2 ring-emerald-400 z-10 relative'
                               : isCursor
@@ -514,7 +680,8 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
                       const isSelected = isIndexSelected(idx, anchorIndex, cursorIndex);
                       const isCursor = idx === cursorIndex;
                       const isModified = origBytesRef.current && bytes[idx] !== origBytesRef.current[idx];
-                      const inMatch = matchRange && idx >= matchRange.start && idx < matchRange.end;
+                      const isCurrentMatchIdx = isCurrentMatch(idx);
+                      const inMatch = !isCurrentMatchIdx && isInAnyMatch(idx);
                       const ch = bytes[idx] >= 32 && bytes[idx] <= 126 ? String.fromCharCode(bytes[idx]) : '.';
 
                       return (
@@ -525,6 +692,8 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
                           className={`inline-block w-[1.1em] text-center cursor-pointer rounded transition-colors ${
                             isSelected
                               ? 'bg-emerald-600 text-white font-medium'
+                              : isCurrentMatchIdx
+                              ? 'bg-emerald-400 text-black'
                               : inMatch
                               ? 'bg-amber-400 text-black'
                               : 'hover:bg-accent text-muted-foreground'
