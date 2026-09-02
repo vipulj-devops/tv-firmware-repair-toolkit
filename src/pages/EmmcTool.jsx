@@ -39,6 +39,7 @@ export default function EmmcTool() {
   const [explorePart, setExplorePart] = useState(null);
   const [exploreBytes, setExploreBytes] = useState(null);
   const [exploreReader, setExploreReader] = useState(null);
+  const [exploreStartByte, setExploreStartByte] = useState(0);
   const [exploreReadOnlyReason, setExploreReadOnlyReason] = useState(null);
   const [exploreInPlaceOnly, setExploreInPlaceOnly] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -189,6 +190,7 @@ export default function EmmcTool() {
     setExplorePart(null);
     setExploreBytes(null);
     setExploreReader(null);
+    setExploreStartByte(0);
     setExploreReadOnlyReason(null);
     setExploreInPlaceOnly(false);
     setBusy(false);
@@ -203,6 +205,7 @@ export default function EmmcTool() {
     setExplorePart(null);
     setExploreBytes(null);
     setExploreReader(null);
+    setExploreStartByte(0);
     setExploreReadOnlyReason(null);
     setExploreInPlaceOnly(false);
     addLog('Reverted all changes');
@@ -444,6 +447,7 @@ export default function EmmcTool() {
       });
       setExploreBytes(session.bytes);
       setExploreReader(session.reader);
+      setExploreStartByte(session.startByte ?? 0);
       setExploreReadOnlyReason(session.readOnlyReason);
       setExploreInPlaceOnly(!!session.inPlaceOnly);
       setExplorePart(p);
@@ -475,7 +479,7 @@ export default function EmmcTool() {
         <header className="border-b border-border bg-card/50 backdrop-blur sticky top-0 z-10">
           <div className="max-w-6xl mx-auto px-5 py-4 flex items-center justify-between">
             <div className="flex items-center gap-3">
-              <button type="button" onClick={() => { setExplorePart(null); setExploreBytes(null); setExploreReader(null); setExploreReadOnlyReason(null); setExploreInPlaceOnly(false); }} className="text-muted-foreground hover:text-foreground" aria-label="Back to partition table"><ArrowLeft className="w-4 h-4" /></button>
+              <button type="button" onClick={() => { setExplorePart(null); setExploreBytes(null); setExploreReader(null); setExploreStartByte(0); setExploreReadOnlyReason(null); setExploreInPlaceOnly(false); }} className="text-muted-foreground hover:text-foreground" aria-label="Back to partition table"><ArrowLeft className="w-4 h-4" /></button>
               <div className="w-9 h-9 rounded-lg bg-sky-600 flex items-center justify-center"><HardDrive className="w-5 h-5 text-white" /></div>
               <div>
                 <h1 className="text-base font-semibold tracking-tight">Explore: {explorePart.name}</h1>
@@ -494,6 +498,7 @@ export default function EmmcTool() {
             <Ext4Browser
               bytes={exploreBytes}
               reader={exploreReader}
+              partitionStartByte={exploreStartByte}
               readOnlyReason={exploreReadOnlyReason}
               inPlaceOnly={exploreInPlaceOnly}
               dirty={dirty}

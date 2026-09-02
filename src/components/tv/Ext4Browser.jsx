@@ -23,8 +23,8 @@ const detectImageType = (raw) => {
   if (raw.length >= 12 && raw[0] === 0x52 && raw[1] === 0x49 && raw[2] === 0x46 && raw[3] === 0x46 && raw[8] === 0x57 && raw[9] === 0x45 && raw[10] === 0x42 && raw[11] === 0x50) return 'webp';
   return null;
 };
-import { isExt4, parseSuperblock, listFiles, readFileBytes, patchFile, getAllocatedSpace, getFreeSpace, growAndPatchFile, deleteFile, createFile } from '@/lib/ext4';
-import { parseSuperblockRange, listFilesRange, readFileBytesRange, getFreeSpaceRange, getAllocatedSpaceRange } from '@/lib/ext4Range';
+import { isExt4, parseSuperblock, listFiles, readFileBytes, readFileBytesWithInfo, patchFile, getAllocatedSpace, getFreeSpace, growAndPatchFile, deleteFile, createFile } from '@/lib/ext4';
+import { parseSuperblockRange, listFilesRange, readFileBytesRange, readFileBytesRangeWithInfo, getFreeSpaceRange, getAllocatedSpaceRange } from '@/lib/ext4Range';
 import { patchExistingFileIo, createFileIo, growAndPatchFileIo, deleteFileIo } from '@/lib/ext4PatchIo';
 import { INPLACE_TOO_LARGE_MESSAGE, EXT4_BEST_EFFORT_NOTE } from '@/lib/exploreSession';
 import { createZip } from '@/lib/zipWriter';
@@ -114,7 +114,7 @@ function TreeNode({ node, depth, expanded, toggle, selected, onSelect, onAddFile
   );
 }
 
-export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, onOverlayPatched, onDownload, onReset, dirty, inPlaceOnly }) {
+export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, onOverlayPatched, onDownload, onReset, dirty, inPlaceOnly, partitionStartByte = 0 }) {
   const memoryWritable = !!bytes;
   const inPlaceWritable = memoryWritable || typeof reader?.write === 'function';
   const growWritable = memoryWritable;
@@ -180,6 +180,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
   const [imgError, setImgError] = useState(false);
   const [imgValid, setImgValid] = useState(true);
   const [rawBytes, setRawBytes] = useState(null);
+  const [fileBaseOffset, setFileBaseOffset] = useState(null);
   const [isBinary, setIsBinary] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [extractProgress, setExtractProgress] = useState(null);
@@ -194,14 +195,30 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
     return readFileBytesRange(reader, inodeNum, sb);
   };
 
+  const loadFileBytesWithInfo = async (inodeNum) => {
+    if (bytes) return readFileBytesWithInfo(bytes, inodeNum, sb);
+    return readFileBytesRangeWithInfo(reader, inodeNum, sb);
+  };
+
   useEffect(() => {
     setImgDirty(false);
     setImgError(false);
     let cancelled = false;
     const run = async () => {
       if (selected) {
-        const raw = await loadFileBytes(selected.inode);
+        const result = await loadFileBytesWithInfo(selected.inode);
+        const raw = result.bytes;
         if (cancelled) return;
+        // Compute physical base offset for HexViewer.
+        // Only safe when the file is stored contiguously with logical block 0.
+        const extents = result.extents || [];
+        let computedBaseOffset = null;
+        if (extents.length === 1 && extents[0].logical === 0) {
+          const firstExtent = extents[0];
+          const startByte = result.startByte ?? partitionStartByte ?? 0;
+          computedBaseOffset = startByte + firstExtent.physical * sb.blockSize;
+        }
+        setFileBaseOffset(computedBaseOffset);
         if (isImage(selected.path)) {
           const detected = detectImageType(raw);
           if (detected) {
@@ -232,6 +249,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
         setContent('');
         setOrigContent('');
         setImgUrl(null);
+        setFileBaseOffset(null);
       }
     };
     run();
@@ -239,7 +257,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
       cancelled = true;
       if (imgUrl) URL.revokeObjectURL(imgUrl);
     };
-  }, [selected, bytes, sb, reader]);
+  }, [selected, bytes, sb, reader, partitionStartByte]);
 
   if (!bytes && rangeLoading && !rangeMeta) {
     return <p className="text-sm text-muted-foreground p-4">Reading ext4 metadata…</p>;
@@ -674,11 +692,12 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
           </div>
         ) : isBinary ? (
           <div className="rounded-md border border-input bg-background min-h-[360px] overflow-hidden">
-            <HexViewer
-              bytes={rawBytes}
-              onEditByte={inPlaceWritable ? editByteInFile : () => {}}
-              onEditBytes={inPlaceWritable ? editBytesInFile : () => {}}
-            />
+             <HexViewer
+               bytes={rawBytes}
+               onEditByte={inPlaceWritable ? editByteInFile : () => {}}
+               onEditBytes={inPlaceWritable ? editBytesInFile : () => {}}
+               baseOffset={fileBaseOffset}
+             />
           </div>
         ) : (
           <textarea value={content} onChange={(e) => setContent(e.target.value)} spellCheck={false}

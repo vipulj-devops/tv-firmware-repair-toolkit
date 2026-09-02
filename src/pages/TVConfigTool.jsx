@@ -250,6 +250,7 @@ export default function TVConfigTool() {
                     onEditBytes={editBytes}
                     highlight={crcHighlight}
                     onSave={download}
+                    baseOffset={0}
                   />
                 )}
 

@@ -56,7 +56,7 @@ export async function loadExplorePartition({
 
   if (replacementBytes) {
     assertExt4(replacementBytes, name);
-    return { mode: 'memory', bytes: replacementBytes, reader: null, overlay: null, readOnlyReason: null };
+    return { mode: 'memory', bytes: replacementBytes, reader: null, overlay: null, readOnlyReason: null, startByte };
   }
 
   if (readSize <= EXT4_EDIT_MEMORY_LIMIT) {
@@ -64,7 +64,7 @@ export async function loadExplorePartition({
       const buf = await file.slice(startByte, startByte + readSize).arrayBuffer();
       const bytes = new Uint8Array(buf);
       assertExt4(bytes, name);
-      return { mode: 'memory', bytes, reader: null, overlay: null, readOnlyReason: null };
+      return { mode: 'memory', bytes, reader: null, overlay: null, readOnlyReason: null, startByte };
     } catch (err) {
       if (err && /does not look like ext4/i.test(err.message)) throw err;
       const { overlay, reader } = wrapRange(file, startByte, readSize, existingOverlay);
@@ -78,6 +78,7 @@ export async function loadExplorePartition({
         inPlaceOnly: true,
         readOnlyReason: MEMORY_LOAD_FAILED_REASON,
         memoryError: err,
+        startByte,
       };
     }
   }
@@ -92,5 +93,6 @@ export async function loadExplorePartition({
     overlay,
     inPlaceOnly: true,
     readOnlyReason: LARGE_PARTITION_READONLY_REASON,
+    startByte,
   };
 }

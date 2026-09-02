@@ -66,9 +66,7 @@ export async function collectExtentsRange(reader, node, sb, out) {
   }
 }
 
-async function readDataRange(reader, inode, sb) {
-  const extents = [];
-  await collectExtentsRange(reader, inode.iBlock, sb, extents);
+async function readDataRangeFromExtents(reader, inode, sb, extents) {
   const iSize = inodeSizeOf(inode);
   if (!extents.length) {
     if (isLnk(inode) && iSize <= 60) return inode.iBlock.subarray(0, iSize);
@@ -89,6 +87,12 @@ async function readDataRange(reader, inode, sb) {
     }
   }
   return buf.subarray(0, Math.min(buf.length, iSize));
+}
+
+async function readDataRange(reader, inode, sb) {
+  const extents = [];
+  await collectExtentsRange(reader, inode.iBlock, sb, extents);
+  return readDataRangeFromExtents(reader, inode, sb, extents);
 }
 
 function parseDirents(block, blockSize) {
@@ -193,6 +197,13 @@ export async function listFilesRange(reader, sb, maxDepth = 8) {
 export async function readFileBytesRange(reader, inodeNum, sb) {
   const inode = await readInodeRange(reader, inodeNum, sb);
   return readDataRange(reader, inode, sb);
+}
+
+export async function readFileBytesRangeWithInfo(reader, inodeNum, sb) {
+  const inode = await readInodeRange(reader, inodeNum, sb);
+  const extents = [];
+  await collectExtentsRange(reader, inode.iBlock, sb, extents);
+  return { bytes: await readDataRangeFromExtents(reader, inode, sb, extents), extents, startByte: reader.startByte };
 }
 
 export async function getAllocatedSpaceRange(reader, inodeNum, sb) {

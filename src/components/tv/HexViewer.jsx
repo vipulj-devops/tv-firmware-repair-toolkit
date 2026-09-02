@@ -27,7 +27,7 @@ import {
 const ROW_BYTES = 16;
 const ROW_HEIGHT = 22; // px
 
-export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEditBytes, highlight, onSave }) {
+export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEditBytes, highlight, onSave, baseOffset = null }) {
   const [copied, setCopied] = useState(null);
   const [query, setQuery] = useState('');
   const [replaceInput, setReplaceInput] = useState('');
@@ -853,26 +853,48 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
 
       {/* Footer Info Bar */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 text-[10px] text-muted-foreground border-t border-border bg-card">
-        <span>
-          {formatBytes(bytes ? bytes.length : 0)} · {totalRows.toLocaleString()} rows
-        </span>
-        <span className="flex items-center gap-3 font-mono">
-          <span>
-            Offset: <strong className="text-foreground">{formatOffsetLabel(cursorIndex)}</strong> ({cursorIndex})
-          </span>
-          <span>
-            Byte: <strong className="text-foreground">{formatByteValue(bytes && cursorIndex < bytes.length ? bytes[cursorIndex] : null)}</strong>
-          </span>
-          <span className={selectionCount > 0 ? 'text-emerald-600' : 'text-muted-foreground'}>
-            {formatSelectionSize(selectionCount)}
-          </span>
-          <span className={modifiedCounterRef.current.getCount() > 0 ? 'text-amber-500' : 'text-muted-foreground'}>
-            Modified: {modifiedCounterRef.current.getCount()}
-          </span>
-        </span>
-        <span className="uppercase text-[9px] px-1.5 py-0.5 rounded border border-border bg-muted/40 font-semibold">
-          Pane: {activePane}
-        </span>
+      <span>
+        {formatBytes(bytes ? bytes.length : 0)} · {totalRows.toLocaleString()} rows
+      </span>
+      <span className="flex items-center gap-3 font-mono">
+        {baseOffset != null ? (
+          <>
+            <span>
+              Editor offset: <strong className="text-foreground">{formatOffsetLabel(cursorIndex)}</strong>
+            </span>
+            <span>
+              Base offset: <strong className="text-foreground">{formatOffsetLabel(baseOffset)}</strong>
+            </span>
+            <span>
+              Absolute dump: <strong className="text-foreground">{formatOffsetLabel(baseOffset + cursorIndex)}</strong>
+            </span>
+            <span className={selectionCount > 0 ? 'text-emerald-600' : 'text-muted-foreground'}>
+              {formatSelectionSize(selectionCount)}
+            </span>
+            <span className={modifiedCounterRef.current.getCount() > 0 ? 'text-amber-500' : 'text-muted-foreground'}>
+              Modified: {modifiedCounterRef.current.getCount()}
+            </span>
+          </>
+        ) : (
+          <>
+            <span>
+              Offset: <strong className="text-foreground">{formatOffsetLabel(cursorIndex)}</strong> ({cursorIndex})
+            </span>
+            <span>
+              Byte: <strong className="text-foreground">{formatByteValue(bytes && cursorIndex < bytes.length ? bytes[cursorIndex] : null)}</strong>
+            </span>
+            <span className={selectionCount > 0 ? 'text-emerald-600' : 'text-muted-foreground'}>
+              {formatSelectionSize(selectionCount)}
+            </span>
+            <span className={modifiedCounterRef.current.getCount() > 0 ? 'text-amber-500' : 'text-muted-foreground'}>
+              Modified: {modifiedCounterRef.current.getCount()}
+            </span>
+          </>
+        )}
+      </span>
+      <span className="uppercase text-[9px] px-1.5 py-0.5 rounded border border-border bg-muted/40 font-semibold">
+        Pane: {activePane}
+      </span>
       </div>
     </div>
   );

@@ -93,9 +93,7 @@ function collectExtents(bytes, blockOff, sb, out) {
   }
 }
 
-function readDataBytes(bytes, inode, sb) {
-  const extents = [];
-  collectExtents(bytes, inode.blockOff, sb, extents);
+function readDataBytesFromExtents(bytes, inode, sb, extents) {
   if (!extents.length) {
     // fast symlink: data stored inline in i_block area
     if (isSymlink(inode) && inodeSize(inode) <= 60) {
@@ -118,6 +116,12 @@ function readDataBytes(bytes, inode, sb) {
     }
   }
   return buf.subarray(0, Math.min(buf.length, inodeSize(inode)));
+}
+
+function readDataBytes(bytes, inode, sb) {
+  const extents = [];
+  collectExtents(bytes, inode.blockOff, sb, extents);
+  return readDataBytesFromExtents(bytes, inode, sb, extents);
 }
 
 function parseDirents(block, blockSize) {
@@ -185,6 +189,13 @@ export function listFiles(bytes, sb, maxDepth = 8) {
 export function readFileBytes(bytes, inodeNum, sb) {
   const inode = readInode(bytes, inodeNum, sb);
   return readDataBytes(bytes, inode, sb);
+}
+
+export function readFileBytesWithInfo(bytes, inodeNum, sb) {
+  const inode = readInode(bytes, inodeNum, sb);
+  const extents = [];
+  collectExtents(bytes, inode.blockOff, sb, extents);
+  return { bytes: readDataBytesFromExtents(bytes, inode, sb, extents), extents };
 }
 
 // Get the total allocated block space for a file (block-aligned, >= i_size).

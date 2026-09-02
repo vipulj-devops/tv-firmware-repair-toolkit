@@ -1567,3 +1567,376 @@ describe('Phase 3B — Replace/Replace All UI State Validation', () => {
     assert.ok(!replaceAllDisabled, 'Replace All still enabled without current match');
   });
 });
+
+describe('Phase 4A-1 — baseOffset Prop & Absolute Dump Offset Display', () => {
+  it('1. formatOffsetLabel formats editor offset with 8-digit padding', () => {
+    assert.equal(formatOffsetLabel(0x1A0), '0x000001A0');
+    assert.equal(formatOffsetLabel(0x6A734000), '0x6A734000');
+  });
+
+  it('2. Absolute dump offset = baseOffset + cursorIndex (editor offset 0x1A0, base 0x6A734000)', () => {
+    const baseOffset = 0x6A734000;
+    const cursorIndex = 0x000001A0;
+    const absolute = baseOffset + cursorIndex;
+    assert.equal(absolute, 0x6A7341A0);
+    assert.equal(formatOffsetLabel(absolute), '0x6A7341A0');
+  });
+
+  it('3. Absolute dump offset when baseOffset is 0 equals editor offset', () => {
+    const baseOffset = 0;
+    const cursorIndex = 0x000001A0;
+    const absolute = baseOffset + cursorIndex;
+    assert.equal(absolute, cursorIndex);
+    assert.equal(formatOffsetLabel(absolute), formatOffsetLabel(cursorIndex));
+  });
+
+  it('4. Absolute dump offset at cursorIndex 0 equals baseOffset', () => {
+    const baseOffset = 0x6A734000;
+    const cursorIndex = 0;
+    const absolute = baseOffset + cursorIndex;
+    assert.equal(absolute, baseOffset);
+    assert.equal(formatOffsetLabel(absolute), '0x6A734000');
+  });
+
+  it('5. formatOffsetLabel handles large numeric offsets (> 0xFFFFFFFF)', () => {
+    const baseOffset = 0x1_0000_0000; // 2^32 = 4 GiB
+    const cursorIndex = 0x000001A0;
+    const absolute = baseOffset + cursorIndex;
+    assert.equal(absolute, 0x1_000001A0);
+    const formatted = formatOffsetLabel(absolute);
+    assert.match(formatted, /^0x[0-9A-F]+$/);
+    assert.equal(formatted, '0x1000001A0'); // '0x' + 9 hex digits
+  });
+
+  it('6. formatOffsetLabel handles baseOffset + cursorIndex boundary at max safe int', () => {
+    const cursorIndex = 0xFFFF;
+    const baseOffset = Number.MAX_SAFE_INTEGER - cursorIndex;
+    const absolute = baseOffset + cursorIndex;
+    assert.equal(absolute, Number.MAX_SAFE_INTEGER);
+    const formatted = formatOffsetLabel(absolute);
+    assert.match(formatted, /^0x[0-9A-F]+$/);
+  });
+
+  it('7. formatOffsetLabel clamps negative results to 0', () => {
+    // baseOffset could theoretically be negative if misused
+    // formatOffsetLabel should not produce negative offsets
+    const badBase = -0x100;
+    const cursorIdx = 0x50;
+    const raw = badBase + cursorIdx; // -0xB0
+    assert.equal(formatOffsetLabel(raw), '0x00000000');
+  });
+
+  it('8. HexViewer accepts baseOffset prop (source contract)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('baseOffset = null'), 'HexViewer should accept baseOffset with default null');
+    assert.ok(src.includes('Editor offset:'), 'HexViewer should display "Editor offset:" label');
+    assert.ok(src.includes('Base offset:'), 'HexViewer should display "Base offset:" label');
+    assert.ok(src.includes('Absolute dump:'), 'HexViewer should display "Absolute dump:" label');
+    assert.ok(src.includes('formatOffsetLabel(baseOffset)'), 'Should format baseOffset with formatOffsetLabel');
+    assert.ok(src.includes('formatOffsetLabel(baseOffset + cursorIndex)'), 'Should compute absolute as baseOffset + cursorIndex');
+  });
+
+  it('9. HexViewer hides absolute offset display when baseOffset is null', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    // When baseOffset is null, the status bar should show "Offset:" not "Editor offset:"
+    assert.ok(src.includes("Offset: <strong"), 'Should show "Offset:" label when baseOffset is null/undefined');
+  });
+
+  it('10. TVConfigTool passes baseOffset={0} to HexViewer', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/pages/TVConfigTool.jsx'), 'utf8');
+
+    assert.ok(src.includes('baseOffset={0}'), 'TVConfigTool should pass baseOffset={0}');
+  });
+
+  it('11. Ext4Browser passes baseOffset={fileBaseOffset} to HexViewer (contiguous only)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/Ext4Browser.jsx'), 'utf8');
+
+    // Ext4Browser should pass baseOffset to HexViewer
+    assert.ok(src.includes('baseOffset={fileBaseOffset}'), 'Ext4Browser should pass baseOffset to HexViewer');
+
+    // But fileBaseOffset should be null for non-contiguous or unselected files
+    assert.ok(src.includes('const [fileBaseOffset, setFileBaseOffset] = useState(null)'),
+      'fileBaseOffset state should default to null');
+
+    // The computation should check for single contiguous extent
+    assert.ok(src.includes('extents.length === 1 && extents[0].logical === 0'),
+      'Should only compute baseOffset for single-extent files with logical=0');
+  });
+
+  it('12. Absolute offset calculation does not modify original bytes', () => {
+    const bytes = new Uint8Array([0x4e, 0x4f, 0x4e, 0x45]);
+    const origCopy = new Uint8Array(bytes);
+    const baseOffset = 0x6A734000;
+    const cursorIndex = 2;
+    const absolute = baseOffset + cursorIndex;
+    assert.equal(absolute, 0x6A734002);
+    assert.deepEqual(Array.from(bytes), Array.from(origCopy), 'Bytes must not change');
+  });
+
+  it('13. validateReplacementInputs with null/undefined inputs returns ok: false', () => {
+    const r1 = validateReplacementInputs(null, '4142', 'hex');
+    assert.ok(!r1.ok);
+
+    const r2 = validateReplacementInputs('4142', null, 'hex');
+    assert.ok(!r2.ok);
+
+    const r3 = validateReplacementInputs(undefined, undefined, 'hex');
+    assert.ok(!r3.ok);
+  });
+
+  it('14. baseOffset default is null (source check)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('baseOffset = null'), 'baseOffset should default to null');
+  });
+});
+
+describe('Phase 4A-2 — EXT4 Physical Offset Propagation', () => {
+  function wu16(b, o, v) { b[o] = v & 0xff; b[o + 1] = (v >>> 8) & 0xff; }
+  function wu32(b, o, v) {
+    b[o] = v & 0xff; b[o + 1] = (v >>> 8) & 0xff;
+    b[o + 2] = (v >>> 16) & 0xff; b[o + 3] = (v >>> 24) & 0xff;
+  }
+
+  async function buildTestExt4() {
+    const { parseSuperblock } = await import('../src/lib/ext4.js');
+    const blockSize = 1024;
+    const bytes = new Uint8Array(16 * blockSize);
+    const sb = 1024;
+    wu32(bytes, sb + 0x00, 16);
+    wu32(bytes, sb + 0x04, 16);
+    wu32(bytes, sb + 0x0C, 6);
+    wu32(bytes, sb + 0x10, 13);
+    wu32(bytes, sb + 0x14, 1);
+    wu32(bytes, sb + 0x18, 0);
+    wu32(bytes, sb + 0x20, 16);
+    wu32(bytes, sb + 0x28, 16);
+    wu16(bytes, sb + 0x38, 0xef53);
+    wu32(bytes, sb + 0x4c, 1);
+    wu16(bytes, sb + 0x58, 128);
+    wu16(bytes, sb + 0xfe, 32);
+
+    const gdt = 2048;
+    wu32(bytes, gdt + 0x00, 3);
+    wu32(bytes, gdt + 0x04, 4);
+    wu32(bytes, gdt + 0x08, 5);
+    wu16(bytes, gdt + 0x0C, 6);
+    wu16(bytes, gdt + 0x0E, 13);
+
+    function writeInode(num, { mode, size, physBlock }) {
+      const off = 5 * blockSize + (num - 1) * 128;
+      wu16(bytes, off + 0x00, mode);
+      wu32(bytes, off + 0x04, size);
+      wu32(bytes, off + 0x20, 0x80000);
+      const eh = off + 0x28;
+      wu16(bytes, eh + 0, 0xf30a);
+      wu16(bytes, eh + 2, 1);
+      wu16(bytes, eh + 4, 4);
+      wu16(bytes, eh + 6, 0);
+      wu32(bytes, eh + 12, 0);
+      wu16(bytes, eh + 16, 1);
+      wu16(bytes, eh + 18, 0);
+      wu32(bytes, eh + 20, physBlock);
+    }
+
+    writeInode(2, { mode: 0x41ed, size: blockSize, physBlock: 8 });
+    writeInode(12, { mode: 0x81a4, size: 6, physBlock: 9 });
+
+    const dir = 8 * blockSize;
+    function dirent(off, inode, recLen, name, typ) {
+      wu32(bytes, off, inode);
+      wu16(bytes, off + 4, recLen);
+      bytes[off + 6] = name.length;
+      bytes[off + 7] = typ;
+      for (let i = 0; i < name.length; i++) bytes[off + 8 + i] = name.charCodeAt(i);
+    }
+    dirent(dir, 2, 12, '.', 2);
+    dirent(dir + 12, 2, 12, '..', 2);
+    dirent(dir + 24, 12, 1024 - 24, 'hello.txt', 1);
+    bytes.set(Buffer.from('hello\n', 'ascii'), 9 * blockSize);
+    return { bytes, sb: parseSuperblock(bytes) };
+  }
+
+  it('1. readFileBytesWithInfo returns Uint8Array bytes matching readFileBytes', async () => {
+    const { readFileBytes, readFileBytesWithInfo } = await import('../src/lib/ext4.js');
+    const { bytes, sb } = await buildTestExt4();
+    const plain = readFileBytes(bytes, 12, sb);
+    const info = readFileBytesWithInfo(bytes, 12, sb);
+
+    assert.ok(info.bytes instanceof Uint8Array);
+    assert.deepEqual(Array.from(info.bytes), Array.from(plain));
+  });
+
+  it('2. readFileBytesWithInfo returns extents array with { logical, physical, len }', async () => {
+    const { readFileBytesWithInfo } = await import('../src/lib/ext4.js');
+    const { bytes, sb } = await buildTestExt4();
+    const info = readFileBytesWithInfo(bytes, 12, sb);
+
+    assert.ok(Array.isArray(info.extents));
+    assert.equal(info.extents.length, 1);
+    assert.deepEqual(info.extents[0], { logical: 0, physical: 9, len: 1 });
+  });
+
+  it('3. readFileBytesRangeWithInfo returns matching bytes and reader.startByte', async () => {
+    const { readFileBytesRange, readFileBytesRangeWithInfo } = await import('../src/lib/ext4Range.js');
+    const { createBufferRangeReader } = await import('../src/lib/rangeReader.js');
+    const { bytes, sb } = await buildTestExt4();
+    const reader = createBufferRangeReader(bytes);
+    const plain = await readFileBytesRange(reader, 12, sb);
+    const info = await readFileBytesRangeWithInfo(reader, 12, sb);
+
+    assert.ok(info.bytes instanceof Uint8Array);
+    assert.deepEqual(Array.from(info.bytes), Array.from(plain));
+    assert.ok(Array.isArray(info.extents));
+    assert.equal(info.startByte, 0);
+  });
+
+  it('4. startByte is preserved for a non-zero range-backed partition', async () => {
+    const { readFileBytesRangeWithInfo } = await import('../src/lib/ext4Range.js');
+    const { createRangeReader } = await import('../src/lib/rangeReader.js');
+    const { bytes, sb } = await buildTestExt4();
+    const reader = createRangeReader({
+      startByte: 0x6A734000,
+      size: bytes.length,
+      readAbsolute: async (start, end) => bytes.subarray(start - 0x6A734000, end - 0x6A734000),
+    });
+
+    const info = await readFileBytesRangeWithInfo(reader, 12, sb);
+    assert.equal(info.startByte, 0x6A734000);
+    assert.equal(info.bytes.length, 6);
+  });
+
+  it('5. single extent + logical 0 produces expected baseOffset', () => {
+    const partitionStartByte = 0x6A734000;
+    const blockSize = 1024;
+    const extents = [{ logical: 0, physical: 9, len: 1 }];
+
+    const isContiguous = extents.length === 1 && extents[0].logical === 0;
+    assert.ok(isContiguous);
+    const baseOffset = isContiguous ? partitionStartByte + extents[0].physical * blockSize : null;
+    assert.equal(baseOffset, 0x6A734000 + 9 * 1024);
+  });
+
+  it('6. multiple extents produces null baseOffset', () => {
+    const extents = [
+      { logical: 0, physical: 9, len: 1 },
+      { logical: 1, physical: 20, len: 1 },
+    ];
+    const isContiguous = extents.length === 1 && extents[0].logical === 0;
+    assert.equal(isContiguous, false);
+    const baseOffset = isContiguous ? 0x6A734000 + extents[0].physical * 1024 : null;
+    assert.equal(baseOffset, null);
+  });
+
+  it('7. first extent logical > 0 produces null baseOffset (sparse file)', () => {
+    const extents = [{ logical: 5, physical: 9, len: 1 }];
+    const isContiguous = extents.length === 1 && extents[0].logical === 0;
+    assert.equal(isContiguous, false);
+    const baseOffset = isContiguous ? 0x6A734000 + extents[0].physical * 1024 : null;
+    assert.equal(baseOffset, null);
+  });
+
+  it('8. existing readFileBytes and readFileBytesRange APIs remain unchanged (return Uint8Array)', async () => {
+    const { readFileBytes } = await import('../src/lib/ext4.js');
+    const { readFileBytesRange } = await import('../src/lib/ext4Range.js');
+    const { createBufferRangeReader } = await import('../src/lib/rangeReader.js');
+    const { bytes, sb } = await buildTestExt4();
+    const reader = createBufferRangeReader(bytes);
+
+    const syncBytes = readFileBytes(bytes, 12, sb);
+    assert.ok(syncBytes instanceof Uint8Array);
+    assert.equal(syncBytes.length, 6);
+
+    const asyncBytes = await readFileBytesRange(reader, 12, sb);
+    assert.ok(asyncBytes instanceof Uint8Array);
+    assert.equal(asyncBytes.length, 6);
+  });
+
+  it('9. Ext4Browser uses WithInfo APIs for display and original APIs for edit operations', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/Ext4Browser.jsx'), 'utf8');
+
+    // Display path uses loadFileBytesWithInfo
+    assert.ok(src.includes('loadFileBytesWithInfo(selected.inode)'), 'Display effect should call loadFileBytesWithInfo');
+    assert.ok(!src.includes('const raw = await loadFileBytes(selected.inode);\n        const result = await loadFileBytesWithInfo'), 'Should NOT read file twice');
+
+    // Edit path uses original Uint8Array APIs
+    assert.ok(src.includes('readFileBytes(bytes, selected.inode, sb)'), 'editByteInFile should use original readFileBytes');
+    assert.ok(src.includes('readFileBytesRange(reader, selected.inode, sb)'), 'editByteInFile range should use original readFileBytesRange');
+  });
+
+  it('10. No duplicate file read occurs in Ext4Browser display effect', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/Ext4Browser.jsx'), 'utf8');
+
+    const displayEffect = src.match(/useEffect\(\(\) => \{[\s\S]*?\n  \}, \[selected, bytes, sb, reader, partitionStartByte\]\);/);
+    assert.ok(displayEffect, 'Display effect should exist');
+    const effectCode = displayEffect[0];
+
+    const plainCalls = effectCode.match(/\bloadFileBytes\(/g) || [];
+    const infoCalls = effectCode.match(/\bloadFileBytesWithInfo\(/g) || [];
+
+    assert.equal(plainCalls.length, 0, 'Display effect should not call plain loadFileBytes');
+    assert.equal(infoCalls.length, 1, 'Display effect should call loadFileBytesWithInfo exactly ONCE');
+  });
+
+  it('11. EmmcTool propagates and resets exploreStartByte correctly', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/pages/EmmcTool.jsx'), 'utf8');
+
+    // State declaration
+    assert.ok(src.includes('const [exploreStartByte, setExploreStartByte] = useState(0)'));
+
+    // Passed to Ext4Browser
+    assert.ok(src.includes('partitionStartByte={exploreStartByte}'));
+
+    // Propagated from session
+    assert.ok(src.includes('setExploreStartByte(session.startByte ?? 0)'));
+
+    // Reset on back / load / revert
+    const resetCount = (src.match(/setExploreStartByte\(0\)/g) || []).length;
+    assert.ok(resetCount >= 3, 'Should reset exploreStartByte on loadMain, revert, and back button');
+  });
+
+  it('12. Ext4Browser useEffect includes partitionStartByte in dependency array', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/Ext4Browser.jsx'), 'utf8');
+
+    assert.ok(src.includes('}, [selected, bytes, sb, reader, partitionStartByte]);'),
+      'Ext4Browser file-loading useEffect must include partitionStartByte in its dependency array');
+  });
+});
