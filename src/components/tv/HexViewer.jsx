@@ -8,6 +8,8 @@ import {
   navigateKey,
   createEditHistory,
   isEditableFormControl,
+  parseOffsetInput,
+  clampGotoOffset,
 } from '@/lib/hexEditorCore';
 
 const ROW_BYTES = 16;
@@ -19,6 +21,10 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
   const [matches, setMatches] = useState([]);
   const [matchIdx, setMatchIdx] = useState(-1);
   const [needleLen, setNeedleLen] = useState(0);
+
+  // Go To Offset
+  const [gotoInput, setGotoInput] = useState('');
+  const [gotoError, setGotoError] = useState(null);
 
   // Shared cursor & selection state
   const [cursorIndex, setCursorIndex] = useState(0);
@@ -173,6 +179,40 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
       setCursorIndex(item.index);
       setAnchorIndex(item.index);
       setHistoryTick((t) => t + 1);
+    }
+  };
+
+  const handleGotoOffset = () => {
+    setGotoError(null);
+    if (!bytes || bytes.length === 0) {
+      setGotoError('No data loaded.');
+      return;
+    }
+    const parsed = parseOffsetInput(gotoInput);
+    if (!parsed.ok) {
+      setGotoError(parsed.error);
+      return;
+    }
+    const clamped = clampGotoOffset(parsed.value, bytes.length);
+    if (!clamped.ok) {
+      setGotoError(clamped.error);
+      return;
+    }
+    const target = clamped.value;
+    setCursorIndex(target);
+    setAnchorIndex(target);
+    setHexNibble('');
+    setGotoInput('');
+    // Scroll the target row into view via the existing auto-scroll effect
+    if (scrollRef.current) {
+      const row = Math.floor(target / ROW_BYTES);
+      const targetTop = row * ROW_HEIGHT;
+      const container = scrollRef.current;
+      if (targetTop < container.scrollTop) {
+        container.scrollTop = targetTop;
+      } else if (targetTop + ROW_HEIGHT > container.scrollTop + container.clientHeight) {
+        container.scrollTop = targetTop + ROW_HEIGHT - container.clientHeight;
+      }
     }
   };
 
@@ -346,6 +386,28 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
         <span className="text-[11px] text-muted-foreground shrink-0 w-16 text-right font-mono">
           {query ? (matches.length ? `${matchIdx + 1}/${matches.length}` : '0/0') : ''}
         </span>
+        <div className="h-4 w-px bg-border mx-1" />
+        <span className="text-[11px] text-muted-foreground shrink-0">Go To:</span>
+        <div className="relative">
+          <input
+            value={gotoInput}
+            onChange={(e) => { setGotoInput(e.target.value); setGotoError(null); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleGotoOffset(); } if (e.key === 'Escape') { setGotoInput(''); setGotoError(null); } }}
+            placeholder="0x…"
+            className={`w-28 rounded-md border bg-background px-2 py-1 text-xs font-mono outline-none ${gotoError ? 'border-rose-500 focus:ring-rose-500/40' : 'border-input focus:ring-emerald-500/40'} focus:ring-2`}
+          />
+        </div>
+        <button
+          onClick={handleGotoOffset}
+          className="flex items-center gap-1 text-xs rounded-md border border-border hover:bg-accent px-2.5 py-1 transition-colors"
+        >
+          Go
+        </button>
+        {gotoError && (
+          <span className="text-[10px] text-rose-500 max-w-48 truncate" title={gotoError}>
+            {gotoError}
+          </span>
+        )}
       </div>
 
       {/* Table Headers */}

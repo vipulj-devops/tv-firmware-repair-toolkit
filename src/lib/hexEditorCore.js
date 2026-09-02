@@ -158,3 +158,37 @@ export function isEditableFormControl(target) {
   if (target.getAttribute && target.getAttribute('contenteditable') === 'true') return true;
   return false;
 }
+
+export function parseOffsetInput(input) {
+  if (input == null) return { ok: false, error: 'No input provided.' };
+  const trimmed = String(input).trim();
+  if (trimmed === '') return { ok: false, error: 'Please enter an offset.' };
+
+  const isHex = /^0[xX][0-9a-fA-F]+$/.test(trimmed);
+  const isPlainHex = /^[0-9a-fA-F]+$/.test(trimmed);
+
+  if (isHex) {
+    const val = parseInt(trimmed, 16);
+    if (Number.isNaN(val)) return { ok: false, error: 'Invalid hexadecimal offset.' };
+    return { ok: true, value: val };
+  }
+
+  if (isPlainHex) {
+    const val = parseInt(trimmed, 16);
+    if (Number.isNaN(val)) return { ok: false, error: 'Invalid hexadecimal offset.' };
+    return { ok: true, value: val };
+  }
+
+  return { ok: false, error: 'Please enter a valid hex offset (e.g. 0x03800000).' };
+}
+
+export function clampGotoOffset(offset, length) {
+  const i = Math.floor(offset);
+  if (i < 0) return { ok: false, error: 'Offset cannot be negative.' };
+  if (i >= length) return { ok: false, error: `Offset 0x${i.toString(16).toUpperCase()} is beyond the end of the buffer (length 0x${length.toString(16).toUpperCase()}).` };
+  return { ok: true, value: i };
+}
+
+export function getRowForOffset(offset, rowBytes = 16) {
+  return Math.floor(offset / rowBytes);
+}

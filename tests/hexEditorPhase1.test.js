@@ -12,6 +12,9 @@ import {
   applyAsciiEdit,
   applyHexEdit,
   isEditableFormControl,
+  parseOffsetInput,
+  clampGotoOffset,
+  getRowForOffset,
 } from '../src/lib/hexEditorCore.js';
 
 describe('Phase 1 Hex/ASCII Editor Core Tests', () => {
@@ -212,5 +215,118 @@ describe('Phase 1 Hex/ASCII Editor Core Tests', () => {
     assert.ok(!isEditableFormControl(undefined));
     assert.ok(!isEditableFormControl({}));
     assert.ok(!isEditableFormControl({ tagName: '', getAttribute: () => null }));
+  });
+});
+
+describe('Phase 2A — Go To Offset', () => {
+  it('1. Parse 0x24 correctly', () => {
+    const r = parseOffsetInput('0x24');
+    assert.ok(r.ok);
+    assert.equal(r.value, 0x24);
+  });
+
+  it('2. Parse 24 as hexadecimal', () => {
+    const r = parseOffsetInput('24');
+    assert.ok(r.ok);
+    assert.equal(r.value, 0x24);
+  });
+
+  it('3. Parse uppercase 0X and lowercase 0x', () => {
+    assert.equal(parseOffsetInput('0X24').value, 0x24);
+    assert.equal(parseOffsetInput('0x24').value, 0x24);
+    assert.equal(parseOffsetInput('0Xabcdef').value, 0xabcdef);
+  });
+
+  it('4. Reject empty input', () => {
+    const r = parseOffsetInput('');
+    assert.ok(!r.ok);
+    assert.match(r.error, /enter/i);
+  });
+
+  it('5. Reject invalid hexadecimal input', () => {
+    const r = parseOffsetInput('xyz');
+    assert.ok(!r.ok);
+    assert.match(r.error, /hex/i);
+  });
+
+  it('5b. Reject 0xZZZZ', () => {
+    const r = parseOffsetInput('0xZZZZ');
+    assert.ok(!r.ok);
+  });
+
+  it('6. Reject negative input', () => {
+    const r = parseOffsetInput('-1');
+    assert.ok(!r.ok);
+  });
+
+  it('7. Reject offset == bytes.length', () => {
+    const length = 100;
+    const r = clampGotoOffset(100, length);
+    assert.ok(!r.ok);
+    assert.match(r.error, /beyond/i);
+  });
+
+  it('8. Accept offset == bytes.length - 1', () => {
+    const length = 100;
+    const r = clampGotoOffset(99, length);
+    assert.ok(r.ok);
+    assert.equal(r.value, 99);
+  });
+
+  it('9. Calculate correct row index', () => {
+    assert.equal(getRowForOffset(0x00, 16), 0);
+    assert.equal(getRowForOffset(0x0f, 16), 0);
+    assert.equal(getRowForOffset(0x10, 16), 1);
+    assert.equal(getRowForOffset(0x1f, 16), 1);
+    assert.equal(getRowForOffset(0x24, 16), 2);
+    assert.equal(getRowForOffset(0x03800000, 16), 0x03800000 / 16);
+  });
+
+  it('10. parseOffsetInput + clampGotoOffset does not modify bytes', () => {
+    const bytes = new Uint8Array([0x10, 0x20, 0x30, 0x40, 0x50]);
+    const origCopy = new Uint8Array(bytes);
+    const parsed = parseOffsetInput('0x2');
+    assert.ok(parsed.ok);
+    const clamped = clampGotoOffset(parsed.value, bytes.length);
+    assert.ok(clamped.ok);
+    assert.equal(clamped.value, 2);
+    // bytes array unchanged
+    assert.deepEqual(Array.from(bytes), Array.from(origCopy));
+  });
+
+  it('11. Existing cursor/selection behavior remains intact', () => {
+    const { cursorIndex, anchorIndex } = moveCursor({ cursorIndex: 0, anchorIndex: 0, newIndex: 5, length: 100 });
+    assert.equal(cursorIndex, 5);
+    assert.equal(anchorIndex, 5);
+  });
+
+  it('12. Existing ASCII editing remains intact', () => {
+    const bytes = new Uint8Array([0x61, 0x62, 0x63]);
+    const edit = applyAsciiEdit(1, 'Z'.charCodeAt(0), bytes);
+    assert.ok(edit);
+    assert.equal(edit.before, 0x62);
+    assert.equal(edit.after, 0x5a);
+    const updated = new Uint8Array(bytes);
+    updated[edit.index] = edit.after;
+    assert.equal(updated.length, 3);
+    assert.equal(String.fromCharCode(updated[1]), 'Z');
+  });
+
+  it('13. Existing HEX editing remains intact', () => {
+    const bytes = new Uint8Array([0x10, 0x20, 0x30]);
+    const edit = applyHexEdit(1, 0xff, bytes);
+    assert.ok(edit);
+    assert.equal(edit.after, 0xff);
+    const updated = new Uint8Array(bytes);
+    updated[edit.index] = edit.after;
+    assert.equal(updated[1], 0xff);
+    assert.equal(updated.length, 3);
+  });
+
+  it('14. Search input keyboard behavior remains intact (form control guard)', () => {
+    // Simulating a search input element
+    const mockInput = { tagName: 'INPUT', getAttribute: () => null };
+    assert.ok(isEditableFormControl(mockInput));
+    // This ensures the editor's keydown handler would return early for this target
   });
 });
