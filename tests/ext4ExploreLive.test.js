@@ -34,6 +34,7 @@ function partsFor(path) {
     gptParts: autoMapPartitions(head.bytes, head.size),
     userAreaAnalysis: ua,
     firmwareParts: firmwarePartitionsToParts(fw, head.size),
+    bytes: head.bytes,
   });
   return { ...head, parts };
 }

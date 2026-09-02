@@ -69,6 +69,7 @@ export default function EmmcTool() {
     firmwareParts: firmwareAnalysis ? firmwarePartitionsToParts(firmwareAnalysis, file1?.size || 0) : [],
     filesystemHits: effectiveFsHits,
     fileSize: file1?.size || 0,
+    bytes: gptBytes,
   }), [gptFound, gptParts, userAreaAnalysis, firmwareAnalysis, effectiveFsHits, file1]);
   const overlayDirty = Object.values(overlays).some((o) => o && o.hasWrites());
   const dirty = overlayTick >= 0 && (Object.keys(replacements).length > 0 || overlayDirty);

@@ -14,6 +14,7 @@ const TYPE_STYLES = {
   'blkdevparts_mmc': 'bg-teal-500/10 text-teal-700',
   'realtek_partinfo': 'bg-sky-500/10 text-sky-700',
   'inferred_fs': 'bg-amber-500/10 text-amber-700 border border-amber-500/20',
+  'metadata': 'bg-slate-400/10 text-slate-600',
 };
 
 const FS_COLORS = {
@@ -27,6 +28,29 @@ const FS_COLORS = {
   raw: 'text-muted-foreground',
 };
 
+const STATUS_DOT_CONFIG = {
+  editable: {
+    color: 'bg-emerald-500',
+    tooltip: 'Editable — independent non-overlapping region',
+  },
+  readonly: {
+    color: 'bg-amber-500',
+    tooltip: 'Read-only / informational',
+  },
+  blocked: {
+    color: 'bg-rose-500',
+    tooltip: 'Blocked — overlaps another region',
+  },
+  metadata: {
+    color: 'bg-slate-400',
+    tooltip: 'Metadata — partition/storage metadata',
+  },
+  nested: {
+    color: 'bg-blue-500',
+    tooltip: 'Nested region — contained within another region',
+  },
+};
+
 const controlClass = 'h-8 text-xs rounded-md border border-border bg-transparent px-2 text-foreground';
 
 function typeLabel(p) {
@@ -36,6 +60,7 @@ function typeLabel(p) {
   if (p.ptType === 'emmc-rpmb') return 'RPMB';
   if (p.ptType === 'emmc-gp') return 'GP';
   if (p.ptType === 'vendor') return 'VENDOR';
+  if (p.ptType === 'metadata') return 'META';
   if (p.ptType === 'emmc_1630_5840') return 'eMMC 0x1630/0x5840 Map';
   if (p.ptType === 'aml_mpt') return 'Amlogic MPT';
   if (p.ptType === 'realtek_partinfo') return 'PART.INFO';
@@ -49,6 +74,34 @@ function typeLabel(p) {
 function filesystemLabel(p, ext4Map) {
   if (ext4Map[p.name]) return 'ext4';
   return p.fsType || 'raw';
+}
+
+function PartitionLegend() {
+  return (
+    <div className="flex flex-wrap items-center gap-3 px-2 py-1.5 mb-2 text-[11px] text-muted-foreground bg-muted/20 rounded-lg border border-border/50">
+      <span className="font-semibold text-foreground text-[10px] uppercase tracking-wide">Legend:</span>
+      <span className="flex items-center gap-1.5" title="Editable — independent non-overlapping region">
+        <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+        <span>Editable</span>
+      </span>
+      <span className="flex items-center gap-1.5" title="Read-only / informational">
+        <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0" />
+        <span>Read-only / Informational</span>
+      </span>
+      <span className="flex items-center gap-1.5" title="Blocked — overlaps another region">
+        <span className="w-2 h-2 rounded-full bg-rose-500 shrink-0" />
+        <span>Blocked — Overlaps another region</span>
+      </span>
+      <span className="flex items-center gap-1.5" title="Metadata — partition/storage metadata">
+        <span className="w-2 h-2 rounded-full bg-slate-400 shrink-0" />
+        <span>Metadata</span>
+      </span>
+      <span className="flex items-center gap-1.5" title="Nested region — contained within another region">
+        <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
+        <span>Nested Region</span>
+      </span>
+    </div>
+  );
 }
 
 export default function PartitionTable({ parts, ext4Map, selected, onToggle, onToggleAll, onSave, onReplace, onExplore }) {
@@ -98,6 +151,7 @@ export default function PartitionTable({ parts, ext4Map, selected, onToggle, onT
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
+      <PartitionLegend />
       <div className="flex flex-wrap items-center gap-2 px-2 pb-2 shrink-0">
         <label className="relative flex-1 min-w-[10rem]">
           <Search className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
@@ -182,6 +236,15 @@ export default function PartitionTable({ parts, ext4Map, selected, onToggle, onT
                 const availableSize = p.availableSize ?? p.size;
                 const isTruncated = !!p.truncated;
                 const isUnavailable = !!p.unavailable;
+                const statusKey = p.status || (p.editable === false ? 'readonly' : 'editable');
+                const statusDotStyle = STATUS_DOT_CONFIG[statusKey]?.color || (p.editable === false ? 'bg-amber-500' : 'bg-emerald-500');
+                const statusTooltip = p.statusReason || STATUS_DOT_CONFIG[statusKey]?.tooltip;
+                const isReplaceDisabled = isUnavailable || p.editable === false;
+                const replaceTitle = isUnavailable
+                  ? 'Unavailable partition cannot be replaced'
+                  : p.editable === false
+                  ? (p.statusReason || 'Non-editable partition')
+                  : undefined;
                 const sizeTitle = isTruncated
                   ? `Declared: ${formatBytes(declaredSize)} · Available in dump: ${formatBytes(availableSize)}`
                   : isUnavailable
@@ -193,7 +256,15 @@ export default function PartitionTable({ parts, ext4Map, selected, onToggle, onT
                       <input type="checkbox" checked={isSel} disabled={isUnavailable} onChange={() => onToggle(p)} className="rounded disabled:opacity-40 disabled:cursor-not-allowed" />
                     </td>
                     <td className="py-2 px-2 text-muted-foreground">{p.index}</td>
-                    <td className="py-2 px-2 font-mono whitespace-nowrap">{p.name}</td>
+                    <td className="py-2 px-2 font-mono whitespace-nowrap">
+                      <div className="flex items-center gap-1.5">
+                        <span
+                          className={`w-2 h-2 rounded-full shrink-0 ${statusDotStyle}`}
+                          title={statusTooltip}
+                        />
+                        <span>{p.name}</span>
+                      </div>
+                    </td>
                     <td className="py-2 px-2 text-xs">
                       <div className="flex items-center gap-1 flex-wrap">
                         <span className={`rounded px-1.5 py-0.5 font-medium ${TYPE_STYLES[p.ptType] || 'bg-muted text-muted-foreground'}`}>{typeLabel(p)}</span>
@@ -217,7 +288,7 @@ export default function PartitionTable({ parts, ext4Map, selected, onToggle, onT
                         <button type="button" onClick={() => onSave(p)} disabled={isUnavailable} title={isUnavailable ? 'Unavailable partition cannot be saved' : undefined} className={`flex items-center gap-1 text-xs rounded-md border border-border px-2 py-1 transition-colors ${isUnavailable ? 'opacity-40 cursor-not-allowed' : 'hover:bg-accent'}`}>
                           <Save className="w-3 h-3" /> Save
                         </button>
-                        <button type="button" onClick={() => onReplace(p)} disabled={isUnavailable} title={isUnavailable ? 'Unavailable partition cannot be replaced' : undefined} className={`flex items-center gap-1 text-xs rounded-md border border-border px-2 py-1 transition-colors ${isUnavailable ? 'opacity-40 cursor-not-allowed' : 'hover:bg-accent'}`}>
+                        <button type="button" onClick={() => onReplace(p)} disabled={isReplaceDisabled} title={replaceTitle} className={`flex items-center gap-1 text-xs rounded-md border border-border px-2 py-1 transition-colors ${isReplaceDisabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-accent'}`}>
                           <Upload className="w-3 h-3" /> Replace
                         </button>
                         {ext4 && (

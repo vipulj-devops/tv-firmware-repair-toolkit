@@ -46,11 +46,10 @@ function unique(items) { return [...new Set(items.filter(Boolean))]; }
 
 // ---------- text scan (deep) ----------
 
-function scanText(bytes) {
-  const len = Math.min(bytes.length, TEXT_SCAN_CAP);
+function scanText(bytes, cap = TEXT_SCAN_CAP) {
+  const len = Math.min(bytes.length, cap);
   // latin1 preserves each byte as a single char (0x00–0xFF) — fast and lossless
-  // for the marker/regex scans below, and avoids the catastrophic cost of
-  // building a multi-MB string byte-by-byte (the old loop hung the browser).
+  // for the marker/regex scans below.
   return new TextDecoder('latin1').decode(bytes.subarray(0, len));
 }
 
@@ -93,6 +92,36 @@ function parseMtdparts(text) {
   return parts;
 }
 
+// Realtek / TCL C header definitions: #define FW_KERNEL " target=deaddead offset=3808000 size=179c100 type=aes "
+// or #define PART0 " offset=c300000 size=100000 mount_point=/frp filesystem=ext4 partname=frp ... "
+function parseBootParams(text) {
+  const parts = [];
+  const regex = /#define\s+([A-Z0-9_]+)\s+"([^"]+)"/gi;
+  let m;
+  while ((m = regex.exec(text)) !== null) {
+    const macroName = m[1];
+    const body = m[2];
+    const offMatch = body.match(/offset=([0-9a-f]+)/i);
+    const sizeMatch = body.match(/size=([0-9a-f]+)/i);
+    const partNameMatch = body.match(/partname=([-\w.]+)/i);
+
+    if (offMatch && sizeMatch) {
+      const name = partNameMatch ? partNameMatch[1] : macroName;
+      const off = parseInt(offMatch[1], 16);
+      const sz = parseInt(sizeMatch[1], 16);
+      if (Number.isFinite(off) && Number.isFinite(sz) && sz > 0) {
+        parts.push({
+          name,
+          size: `0x${sz.toString(16)}`,
+          start: `0x${off.toString(16)}`,
+          source: 'bootparams',
+        });
+      }
+    }
+  }
+  return parts;
+}
+
 // ---------- ZIP container parser ----------
 // Many vendor firmwares (LG webOS .pkg, Realtek, MTK, generic) ship as ZIP
 // archives whose entries are the partition images. The central directory lives
@@ -102,7 +131,6 @@ const ZIP_EOCD = [0x50, 0x4b, 0x05, 0x06]; // PK\x05\x06
 const ZIP_CD_ENTRY = [0x50, 0x4b, 0x01, 0x02]; // PK\x01\x02
 
 function findEocd(tail) {
-  // EOCD is at most 22 + 65535 (comment) bytes from the end.
   const min = Math.max(0, tail.length - (22 + 65535));
   for (let i = tail.length - 22; i >= min; i--) {
     if (hasBytes(tail, i, ZIP_EOCD)) return i;
@@ -110,60 +138,44 @@ function findEocd(tail) {
   return -1;
 }
 
-function parseZip(headBytes, tailBytes, fileSize) {
+function parseZip(bytes, tailBytes, fileSize) {
   if (!tailBytes) return [];
-  const eocd = findEocd(tailBytes);
-  if (eocd < 0) return [];
-  const totalEntries = u16(tailBytes, eocd + 10);
-  const cdSize = u32le(tailBytes, eocd + 12);
-  const cdOffset = u32le(tailBytes, eocd + 16); // relative to file start
-  if (totalEntries === 0 || cdSize === 0) return [];
-
-  const tailStart = fileSize - tailBytes.length;
-  let cd;
-  if (cdOffset >= tailStart && cdOffset + cdSize <= fileSize) {
-    cd = tailBytes.subarray(cdOffset - tailStart, cdOffset - tailStart + cdSize);
-  } else if (headBytes && cdOffset + cdSize <= headBytes.length) {
-    cd = headBytes.subarray(cdOffset, cdOffset + cdSize);
-  } else {
-    return []; // central directory not in the head or tail window
-  }
+  const eocdOff = findEocd(tailBytes);
+  if (eocdOff < 0) return [];
+  const count = u16(tailBytes, eocdOff + 10);
+  const cdSize = u32le(tailBytes, eocdOff + 12);
+  const cdOffset = u32le(tailBytes, eocdOff + 16);
+  if (count === 0 || count > 500) return [];
 
   const parts = [];
-  let p = 0;
-  for (let i = 0; i < totalEntries && p + 46 <= cd.length; i++) {
-    if (!hasBytes(cd, p, ZIP_CD_ENTRY)) break;
-    const compSize = u32le(cd, p + 20);
-    const uncompSize = u32le(cd, p + 24);
-    const nameLen = u16(cd, p + 28);
-    const extraLen = u16(cd, p + 30);
-    const commentLen = u16(cd, p + 32);
-    const localOffset = u32le(cd, p + 42);
-    if (p + 46 + nameLen > cd.length) break;
-    const rawName = asciiAt(cd, p + 46, nameLen).replace(/\0.*$/, '');
-    const name = rawName.replace(/\\/g, '/');
+  let cur = 0;
+  for (let i = 0; i < count; i++) {
+    const entryStart = tailBytes.length - (tailBytes.length - eocdOff) - cdSize + cur;
+    if (entryStart < 0 || entryStart + 46 > tailBytes.length) break;
+    if (!hasBytes(tailBytes, entryStart, ZIP_CD_ENTRY)) break;
+    const compressedSize = u32le(tailBytes, entryStart + 20);
+    const uncompressedSize = u32le(tailBytes, entryStart + 24);
+    const nameLen = u16(tailBytes, entryStart + 28);
+    const extraLen = u16(tailBytes, entryStart + 30);
+    const commentLen = u16(tailBytes, entryStart + 32);
+    const localHeaderOffset = u32le(tailBytes, entryStart + 42);
+    const name = asciiAt(tailBytes, entryStart + 46, nameLen);
     if (name && !name.endsWith('/')) {
-      const base = name.split('/').pop() || name;
+      const sz = uncompressedSize || compressedSize;
       parts.push({
-        name: base,
-        size: `0x${uncompSize.toString(16)}`,
-        start: `0x${localOffset.toString(16)}`,
+        name,
+        size: sz ? `0x${sz.toString(16)}` : '—',
+        start: `0x${localHeaderOffset.toString(16)}`,
         source: 'ZIP',
-        path: name,
-        compSize,
       });
     }
-    p += 46 + nameLen + extraLen + commentLen;
+    cur += 46 + nameLen + extraLen + commentLen;
   }
   return parts;
 }
 
-// ---------- binary header parsers ----------
+// ---------- Amlogic uimage / aml_sdc_burn / aml_nand ----------
 
-// Amlogic: aml_upgrade_package.img
-// Header magic "AML" at 0, or U-Boot mkimage header (magic 0x27051956 BE) at 0/0x40.
-// The upgrade package item table: after a fixed header, entries of
-//   name[32] + offset[8] + size[8] + type[4] ... repeated.
 function parseAmlogic(bytes, fileSize) {
   const parts = [];
   const mkMagic = u32be(bytes, 0);
@@ -180,19 +192,16 @@ function parseAmlogic(bytes, fileSize) {
     if (sz === 0 || sz > 0x1000000000) continue;
     if (off > 0 && off < 0x1000000000 && (!fileSize || off + sz <= fileSize)) {
       parts.push({ name, size: `0x${sz.toString(16)}`, start: `0x${off.toString(16)}`, source: 'AML item' });
-      o += 44; // +4 from the for-loop step = 48-byte item slot (was +52, skipping every other item)
+      o += 44;
     }
   }
   return uniqueParts(parts);
 }
 
-// MediaTek: BRLYT header at 0x1018. BR_LAYOUT follows with partition entries.
-// Each entry: name[16] + start_lba(4) + size_blocks(4).
+// ---------- MediaTek scatter / preloader ----------
+
 function parseMediaTek(bytes) {
   const parts = [];
-  // BRLYT magic ("BRLYT") sits at 0x1018 — NOT aligned to 0x200, so the old
-  // stepped scan (o += 0x200) never landed on it and MTK dumps parsed empty.
-  // Scan byte-by-byte through the first 0x2000 to find the signature.
   const scanLimit = Math.min(bytes.length, 0x2000);
   let brlyt = -1;
   for (let o = 0; o + 5 <= scanLimit; o++) {
@@ -211,8 +220,8 @@ function parseMediaTek(bytes) {
   return uniqueParts(parts);
 }
 
-// LG EPK: "EPK0"/"EPK1"/"EPK2"/"EPK3" magic at 0.
-// Header: version, count, then entries with name + offset + size.
+// ---------- LG EPK / webOS PKG ----------
+
 function parseLg(bytes) {
   const parts = [];
   for (const sig of ['EPK0', 'EPK1', 'EPK2', 'EPK3']) {
@@ -232,8 +241,8 @@ function parseLg(bytes) {
   return uniqueParts(parts);
 }
 
-// HiSilicon: header magic "HISI" or "HI" at 0, partition table with
-// name[32] + offset(8) + size(8) entries.
+// ---------- HiSilicon fastboot ----------
+
 function parseHiSilicon(bytes, fileSize) {
   const parts = [];
   const scan = Math.min(bytes.length, 2 * 1024 * 1024);
@@ -252,50 +261,7 @@ function parseHiSilicon(bytes, fileSize) {
   return uniqueParts(parts);
 }
 
-// Realtek / Novatek / MStar / Samsung: scan for partition descriptor blocks.
-// Require a plausible name followed by an offset+size pair (u64le each, or
-// u32le each) so we don't pick up random ascii strings as false partitions.
-function parseGenericDescriptors(bytes, fileSize) {
-  const parts = [];
-  const scan = Math.min(bytes.length, 4 * 1024 * 1024);
-  const limit = fileSize || 0x1000000000;
-  for (let o = 0; o < scan - 48; o += 4) {
-    if (bytes[o] < 32 || bytes[o] > 126) continue;
-    const name = asciiAt(bytes, o, 24);
-    if (!/^[\w.\-]{3,20}$/.test(name)) continue;
-    // try u64le offset + u64le size right after a 24/32-byte name slot
-    for (const nameLen of [24, 32]) {
-      const off = u64le(bytes, o + nameLen);
-      const sz = u64le(bytes, o + nameLen + 8);
-      if (sz >= 512 && sz <= 0x40000000 && off < limit && off + sz <= limit) {
-        parts.push({ name, size: `0x${sz.toString(16)}`, start: `0x${off.toString(16)}`, source: 'descriptor' });
-        o += nameLen + 12; // +4 from the for-loop step = nameLen + 16 (full entry)
-        break;
-      }
-      // try u32le offset + u32le size
-      const off32 = u32le(bytes, o + nameLen);
-      const sz32 = u32le(bytes, o + nameLen + 4);
-      if (sz32 >= 512 && sz32 <= 0x40000000 && off32 < limit && off32 + sz32 <= limit && off32 > 0) {
-        parts.push({ name, size: `0x${sz32.toString(16)}`, start: `0x${off32.toString(16)}`, source: 'descriptor' });
-        o += nameLen + 4; // +4 from the for-loop step = nameLen + 8 (full entry)
-        break;
-      }
-    }
-  }
-  return uniqueParts(parts).slice(0, 40);
-}
-
-function uniqueParts(parts) {
-  const seen = new Set();
-  return parts.filter((p) => !seen.has(p.name.toLowerCase() + p.source) && seen.add(p.name.toLowerCase() + p.source));
-}
-
-// ---------- MStar .bin (U-Boot script header) ----------
-// MStar upgrade .bin files start with a 16 KB U-Boot shell script (plain text,
-// padded to 16 KB with 0xFF). The script is the partition table: `filepartload`
-// loads a region (offset+size) from the .bin into DRAM, then `mmc write.p` /
-// `unlzo` / `sparse_write` / `store_secure_info` write it to a named partition.
-// We replay the script to recover each partition's offset+size in the .bin.
+// ---------- MStar upgrade .bin ----------
 
 function isMstarBin(bytes) {
   const head = bytes.subarray(0, Math.min(bytes.length, 16 * 1024));
@@ -377,11 +343,41 @@ function parseMstarBin(bytes) {
   return uniqueParts(parts);
 }
 
+// Realtek / Novatek / MStar / Samsung: scan for partition descriptor blocks.
+function parseGenericDescriptors(bytes, fileSize) {
+  const parts = [];
+  const scan = Math.min(bytes.length, 4 * 1024 * 1024);
+  const limit = fileSize || 0x1000000000;
+  for (let o = 0; o < scan - 48; o += 4) {
+    if (bytes[o] < 32 || bytes[o] > 126) continue;
+    const name = asciiAt(bytes, o, 24);
+    if (!/^[\w.\-]{3,20}$/.test(name)) continue;
+    for (const nameLen of [24, 32]) {
+      const off = u64le(bytes, o + nameLen);
+      const sz = u64le(bytes, o + nameLen + 8);
+      if (sz >= 512 && sz <= 0x40000000 && off < limit && off + sz <= limit) {
+        parts.push({ name, size: `0x${sz.toString(16)}`, start: `0x${off.toString(16)}`, source: 'descriptor' });
+        o += nameLen + 12;
+        break;
+      }
+      const off32 = u32le(bytes, o + nameLen);
+      const sz32 = u32le(bytes, o + nameLen + 4);
+      if (sz32 >= 512 && sz32 <= 0x40000000 && off32 < limit && off32 + sz32 <= limit && off32 > 0) {
+        parts.push({ name, size: `0x${sz32.toString(16)}`, start: `0x${off32.toString(16)}`, source: 'descriptor' });
+        o += nameLen + 4;
+        break;
+      }
+    }
+  }
+  return uniqueParts(parts).slice(0, 40);
+}
+
+function uniqueParts(parts) {
+  const seen = new Set();
+  return parts.filter((p) => !seen.has(p.name.toLowerCase() + p.source) && seen.add(p.name.toLowerCase() + p.source));
+}
+
 // ---------- family detection ----------
-// Text markers are token-bounded and scored by evidence tier. Candidates are
-// collected first; stronger evidence beats weaker evidence regardless of
-// family-list order. Weak 3-letter tokens (RTD, HISI) never win from a
-// substring inside a larger identifier (e.g. WTrtdI, LGEK, aMLK).
 
 function isTokenChar(ch) {
   if (!ch) return false;
@@ -409,17 +405,17 @@ function findBoundedMarker(source, marker, from = 0, prefixFlag = false) {
   return -1;
 }
 
-function collectMarkerHits(source, marker, family, tier, evidence, prefixFlag = false) {
+function collectMarkerHits(source, marker, family, tier, out, prefixFlag = false) {
   let from = 0;
   while (from <= source.length - marker.length) {
     const at = findBoundedMarker(source, marker, from, prefixFlag);
     if (at < 0) break;
-    evidence.push({ family, marker, tier, offset: at });
+    out.push({ family, marker, tier, offset: at });
     from = at + marker.length;
   }
 }
 
-function collectRtdSocHits(source, evidence) {
+function collectRtdSocHits(source, out) {
   const re = /RTD\d{3,4}[A-Z0-9_]*/g;
   let m;
   while ((m = re.exec(source))) {
@@ -429,7 +425,7 @@ function collectRtdSocHits(source, evidence) {
     const after = at + token.length;
     const rightOk = after >= source.length || !isTokenChar(source[after]);
     if (leftOk && rightOk) {
-      evidence.push({ family: 'Realtek', marker: token, tier: TIER_STRONG, offset: at });
+      out.push({ family: 'Realtek', marker: token, tier: TIER_STRONG, offset: at });
     }
     if (re.lastIndex === at) re.lastIndex += 1;
   }
@@ -521,28 +517,23 @@ function pickFamilyEvidence(evidence) {
       else if (e.offset === best.offset && e.marker.length > best.marker.length) best = e;
     }
   }
-  // Weak 3-letter hits are not enough to name a vendor, except bounded RTD as
-  // a Realtek fallback when nothing stronger is present.
   if (best.tier === TIER_WEAK && best.family !== 'Realtek') return UNKNOWN_FAMILY;
   return { family: best.family, marker: `text: ${best.marker}` };
 }
 
 function detectFamily(bytes, fileName, tailBytes) {
   const fn = fileName.toUpperCase();
-  // ZIP container (PK\x03\x04 local header at 0, or EOCD in tail)
   if (hasBytes(bytes, 0, [0x50, 0x4b, 0x03, 0x04])) return { family: 'ZIP', marker: 'ZIP local header @0' };
   if (tailBytes && findEocd(tailBytes) >= 0) return { family: 'ZIP', marker: 'ZIP EOCD in tail' };
-  // binary magic checks
-  if (hasBytes(bytes, 0, [0x41, 0x4d, 0x4c])) return { family: 'Amlogic', marker: '"AML" magic @0' }; // "AML"
+  if (hasBytes(bytes, 0, [0x41, 0x4d, 0x4c])) return { family: 'Amlogic', marker: '"AML" magic @0' };
   if (u32be(bytes, 0) === 0x27051956) return { family: 'Amlogic', marker: 'U-Boot mkimage @0' };
   if (hasBytes(bytes, 0x1018, [0x42, 0x52, 0x4c, 0x59, 0x54])) return { family: 'MediaTek', marker: 'BRLYT @0x1018' };
   for (const s of ['EPK0', 'EPK1', 'EPK2', 'EPK3']) {
     if (hasBytes(bytes, 0, Array.from(s, (c) => c.charCodeAt(0)))) return { family: 'LG', marker: `${s} magic @0` };
   }
-  // MStar upgrade .bin: 16 KB U-Boot script header padded with 0xFF
   if (isMstarBin(bytes)) return { family: 'MStar', marker: 'U-Boot script header (16KB .bin)' };
 
-  const textNear = scanText(bytes);
+  const textNear = scanText(bytes, TEXT_SCAN_CAP);
   const sourceNear = `${fn}\n${textNear}`.toUpperCase();
   const evidence = [];
   for (const family of FAMILY_TEXT_MARKERS) {
@@ -553,11 +544,7 @@ function detectFamily(bytes, fileName, tailBytes) {
 
   const strongLen = Math.min(bytes.length, STRONG_SCAN_CAP);
   if (strongLen > TEXT_SCAN_CAP) {
-    // Extended window is for Realtek SoC/board IDs that live past the 2 MB
-    // script scan (e.g. RTD284X_DEMO). Other families stay on the 2 MB window
-    // so later toolchain/license strings (V7A-MEDIATEK-LINUX, MEDIATEK SOFTWARE)
-    // cannot override a dump that has no near-window vendor evidence.
-    const textStrong = new TextDecoder('latin1').decode(bytes.subarray(0, strongLen));
+    const textStrong = scanText(bytes, strongLen);
     const sourceStrong = `${fn}\n${textStrong}`.toUpperCase();
     const realtek = FAMILY_TEXT_MARKERS.find((f) => f.name === 'Realtek');
     for (const mk of realtek.markers) {
@@ -574,15 +561,10 @@ function detectFamily(bytes, fileName, tailBytes) {
 
 // ---------- main entry ----------
 
-// Generic binary descriptor hits are firmware-package heuristics, not a
-// validated eMMC partition table. They must not enter dump PT selection.
 export function isDumpFirmwarePartition(p) {
   return p && p.source && p.source !== 'descriptor';
 }
 
-// Convert firmware-parser partitions (hex-string start/size) into the
-// PartitionTable shape (numeric startByte/size, ptType, index) so vendor
-// firmware files show up in the actionable partition table.
 export function firmwarePartitionsToParts(analysis, fileSize) {
   if (!analysis || !analysis.partitions.length) return [];
   const out = [];
@@ -615,10 +597,88 @@ function parseSizeNum(v) {
   return n * (m[2] === 'K' ? 1024 : m[2] === 'M' ? 1024 * 1024 : m[2] === 'G' ? 1024 ** 3 : 1);
 }
 
+// ---------- Realtek system layout parser ----------
+// Detects VERONA__ partition table signature at 0x3800000 and ustar tarball at 0x2000000.
+
+const VERONA_SIG = [0x56, 0x45, 0x52, 0x4f, 0x4e, 0x41, 0x5f, 0x5f]; // "VERONA__"
+const USTAR_SIG = [0x75, 0x73, 0x74, 0x61, 0x72]; // "ustar"
+
+function parseRealtekSystemLayout(bytes, fileSize) {
+  const parts = [];
+  const hasVerona = hasBytes(bytes, 0x3800000, VERONA_SIG);
+  if (!hasVerona) return parts;
+
+  parts.push({
+    name: 'fw table',
+    start: '0x3800000',
+    size: '0x8000',
+    source: 'VERONA',
+  });
+
+  if (bytes.length >= 0x1800000) {
+    parts.push({
+      name: 'bootcode',
+      start: '0x2000',
+      size: '0x17df800',
+      source: 'Realtek bootloader',
+    });
+  }
+
+  if (bytes.length >= 0x1c00000) {
+    parts.push({
+      name: 'factory_ro',
+      start: '0x1800000',
+      size: '0x400000',
+      source: 'Realtek layout',
+    });
+  }
+
+  if (bytes.length >= 0x2000000) {
+    parts.push({
+      name: 'eeprom',
+      start: '0x1c00000',
+      size: '0x400000',
+      source: 'Realtek layout',
+    });
+  }
+
+  const hasTar = hasBytes(bytes, 0x2000000 + 0x101, USTAR_SIG) || hasBytes(bytes, 0x2000000, Array.from('tmp/factory', (c) => c.charCodeAt(0)));
+  if (hasTar || bytes.length >= 0x3000000) {
+    parts.push({
+      name: 'factory',
+      start: '0x2000000',
+      size: '0x1000000',
+      source: hasTar ? 'Realtek factory' : 'Realtek layout',
+    });
+  }
+
+  if (bytes.length >= 0x3400000) {
+    parts.push({
+      name: 'secure store',
+      start: '0x2800000',
+      size: '0xc00000',
+      source: 'Realtek layout',
+    });
+  }
+
+  if (bytes.length >= 0x3800000) {
+    parts.push({
+      name: 'reserved',
+      start: '0x3400000',
+      size: '0x400000',
+      source: 'Realtek layout',
+    });
+  }
+
+  return parts;
+}
+
 export function analyzeFirmware(bytes, fileName = '', fileSize = 0, tailBytes = null) {
   if (!bytes) return null;
   const detected = detectFamily(bytes, fileName, tailBytes);
-  const text = scanText(bytes);
+  // Scan text up to 40 MB for Realtek text headers / bootparams
+  const scanCap = detected.family === 'Realtek' ? Math.min(bytes.length, STRONG_SCAN_CAP) : Math.min(bytes.length, TEXT_SCAN_CAP);
+  const text = scanText(bytes, scanCap);
   const scripts = extractTextScripts(text);
 
   let parts = [];
@@ -631,13 +691,27 @@ export function analyzeFirmware(bytes, fileName = '', fileSize = 0, tailBytes = 
     case 'MStar': parts = parseMstarBin(bytes); break;
     default: parts = parseGenericDescriptors(bytes, fileSize); break;
   }
-  // merge text-based partitions (scatter / mtdparts)
-  const textParts = [...parseScatter(text), ...parseMtdparts(text)];
+  // merge text-based partitions (scatter / mtdparts / bootparams)
+  const textParts = [...parseScatter(text), ...parseMtdparts(text), ...parseBootParams(text)];
   for (const tp of textParts) {
     if (!parts.some((p) => p.name.toLowerCase() === tp.name.toLowerCase())) parts.push(tp);
   }
 
+  if (detected.family === 'Realtek') {
+    const realtekLayout = parseRealtekSystemLayout(bytes, fileSize);
+    for (const rlp of realtekLayout) {
+      if (!parts.some((p) => p.name.toLowerCase() === rlp.name.toLowerCase())) {
+        parts.push(rlp);
+      }
+    }
+  }
+
   const ext = fileName.includes('.') ? fileName.split('.').pop().toUpperCase() : 'BIN';
+  const dumpParts = parts.filter(isDumpFirmwarePartition);
+  const finalPartitions = dumpParts.length > 0
+    ? [...dumpParts, ...parts.filter((p) => !isDumpFirmwarePartition(p))].slice(0, 48)
+    : parts.slice(0, 48);
+
   return {
     family: detected.family,
     marker: detected.marker,
@@ -646,10 +720,10 @@ export function analyzeFirmware(bytes, fileName = '', fileSize = 0, tailBytes = 
       { label: 'Matched signature', value: detected.marker },
       { label: 'Container extension', value: ext },
       { label: 'Header bytes', value: hex(bytes, 16) },
-      { label: 'Scanned region', value: `${Math.min(bytes.length, TEXT_SCAN_CAP).toLocaleString()} bytes` },
-      { label: 'Partitions found', value: String(parts.filter(isDumpFirmwarePartition).length) },
+      { label: 'Scanned region', value: `${scanCap.toLocaleString()} bytes` },
+      { label: 'Partitions found', value: String(dumpParts.length) },
     ],
     scripts,
-    partitions: parts.slice(0, 48),
+    partitions: finalPartitions,
   };
 }

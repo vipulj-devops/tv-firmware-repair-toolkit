@@ -120,6 +120,7 @@ describe('detection precedence: strict registry beats usable MBR', () => {
       gptParts: autoMapPartitions(bytes, BLK_SIZE),
       userAreaAnalysis: ua,
       firmwareParts: [],
+      bytes,
     });
     assert.equal(selected[0].ptType, 'blkdevparts_mmc');
     assert.equal(selected.length, 25);
@@ -135,6 +136,7 @@ describe('detection precedence: strict registry beats usable MBR', () => {
       gptParts: autoMapPartitions(bytes, ROM1_SIZE),
       userAreaAnalysis: ua,
       firmwareParts: [],
+      bytes,
     });
     assert.equal(selected[0].ptType, 'aml_mpt');
     assert.equal(userAreaToParts(ua).length, 21);
@@ -196,6 +198,7 @@ describe('selectDumpParts', () => {
       gptParts,
       userAreaAnalysis: ua,
       firmwareParts: [{ name: 'zip' }],
+      bytes: gptBuffer(),
     });
     assert.equal(selected[0].ptType, 'gpt');
   });
@@ -211,6 +214,7 @@ describe('selectDumpParts', () => {
         ? { ...detectSocUserArea(bytes, 0x100000), partitions: [] }
         : null,
       firmwareParts: [],
+      bytes,
     });
     assert.ok(gptParts.length >= 1);
     assert.equal(selected[0].ptType, 'mbr');

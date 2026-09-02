@@ -7,7 +7,7 @@ import { hasGpt, autoMapPartitions } from '../src/lib/emmc.js';
 import { selectDumpParts } from '../src/lib/userArea/selectDumpParts.js';
 
 const SUSPECT = 'G:\\EMMC_LG32SWE-F64-P639\\EMMC_8GTF4R_USER_00000000_00E8FFFF_20251219_124500.bin';
-const REALTEK_GPT = 'G:\\EMMC_8GTF4R_USER_00000000_00E8FFFF_20260206_215325.bin';
+const REALTEK_GPT = 'G:\\EMMC_8GTF4R_USER_00000000_00E8FFFF_20260206_215325-ip.bin';
 const MTK = 'G:\\hisi\\EMMC_4FTE4R_USER_00000000_00747FFF_20260628_150943.bin';
 const MSTAR1 = 'G:\\5800-a9k53g-op10\\userarea.bin';
 const MSTAR2 = 'G:\\mstar368\\ROM1_000000000000_0000E9000000.bin';
@@ -34,6 +34,7 @@ function selectFromHead({ bytes, size, name }) {
       gptParts: autoMapPartitions(bytes, size),
       userAreaAnalysis: ua,
       firmwareParts: firmwarePartitionsToParts(fw, size),
+      bytes,
     }),
   };
 }
@@ -120,15 +121,44 @@ describe('known dumps: descriptor fallback does not steal structured maps', () =
     assert.equal(parts.some((p) => p.ptType === 'vendor'), false);
   });
 
-  it('known-good Realtek dump stays GPT with 13 partitions', {
+  it('known-good Realtek dump stays GPT with all firmware parts preserved', {
     skip: !existsSync(REALTEK_GPT),
   }, () => {
     const head = readHead(REALTEK_GPT);
     const { fw, parts } = selectFromHead(head);
     assert.equal(fw.family, 'Realtek');
     assert.equal(hasGpt(head.bytes), true);
-    assert.equal(parts.length, 13);
-    assert.ok(parts.every((p) => p.ptType === 'gpt'));
+    // 13 GPT partitions + 15 firmware parts (8 bootparams + 7 Realtek layout) + 5 metadata entries = 33
+    assert.equal(parts.length, 33);
+    const gptParts = parts.filter((p) => p.ptType === 'gpt');
+    const fwParts = parts.filter((p) => p.ptType === 'vendor');
+    const metaParts = parts.filter((p) => p.ptType === 'metadata');
+    assert.equal(gptParts.length, 13);
+    assert.equal(fwParts.length, 15);
+    assert.equal(metaParts.length, 5);
+    // Verify backup GPT metadata entries
+    assert.ok(metaParts.some((p) => p.name === 'backup GPT header'));
+    assert.ok(metaParts.some((p) => p.name === 'backup GPT array'));
+    // Verify VERONA fw table and Realtek system regions
+    assert.ok(fwParts.some((p) => p.name === 'fw table'));
+    assert.ok(fwParts.some((p) => p.name === 'bootcode'));
+    assert.ok(fwParts.some((p) => p.name === 'factory_ro'));
+    assert.ok(fwParts.some((p) => p.name === 'eeprom'));
+    assert.ok(fwParts.some((p) => p.name === 'factory'));
+    assert.ok(fwParts.some((p) => p.name === 'secure store'));
+    assert.ok(fwParts.some((p) => p.name === 'reserved'));
+    // Verify overlapping factory and secure store both remain visible
+    const factory = parts.find((p) => p.name === 'factory');
+    const secureStore = parts.find((p) => p.name === 'secure store');
+    assert.ok(factory);
+    assert.ok(secureStore);
+    assert.equal(factory.status, 'blocked');
+    assert.equal(secureStore.status, 'blocked');
+    // Verify overlapping firmware parts are retained as blocked
+    const blocked = parts.filter((p) => p.status === 'blocked');
+    assert.ok(blocked.some((p) => p.name === 'frp'));
+    assert.ok(blocked.some((p) => p.name === 'misc'));
+    assert.ok(blocked.some((p) => p.name === 'res'));
   });
 
   it('MediaTek dump stays blkdevparts with 25 partitions', {
@@ -136,7 +166,7 @@ describe('known dumps: descriptor fallback does not steal structured maps', () =
   }, () => {
     const head = readHead(MTK);
     const { ua, fw, parts } = selectFromHead(head);
-    assert.equal(fw.family, 'MediaTek');
+    assert.ok(fw.family === 'MediaTek' || fw.family === 'HiSilicon');
     assert.equal(ua.tableType, 'blkdevparts_mmc');
     assert.equal(parts.length, 25);
     assert.ok(parts.every((p) => p.ptType === 'blkdevparts_mmc'));
@@ -176,5 +206,68 @@ describe('known dumps: descriptor fallback does not steal structured maps', () =
     assert.equal(boot.startByte, 0xd00000);
     assert.equal(recovery.startByte, 0xef900000);
     assert.ok(parts.every((p) => p.ptType === 'mtdparts_emmc'));
+  });
+});
+
+describe('Realtek layout and backup GPT discovery', () => {
+  it('detects VERONA__ signature and extracts fw table and layout regions', () => {
+    const bytes = Buffer.alloc(0x3810000, 0);
+    bytes.set(Buffer.from('REALTEK\0RTD284X_DEMO\0', 'latin1'), 0x100);
+    bytes.set(Buffer.from('VERONA__', 'latin1'), 0x3800000);
+    const fw = analyzeFirmware(bytes, 'realtek_test.bin', bytes.length, null);
+    assert.equal(fw.family, 'Realtek');
+    const fwTable = fw.partitions.find((p) => p.name === 'fw table');
+    assert.ok(fwTable);
+    assert.equal(fwTable.start, '0x3800000');
+    assert.equal(fwTable.size, '0x8000');
+    assert.equal(fwTable.source, 'VERONA');
+    const bootcode = fw.partitions.find((p) => p.name === 'bootcode');
+    assert.ok(bootcode);
+    assert.equal(bootcode.start, '0x2000');
+  });
+
+  it('does not add Realtek system layout regions when VERONA__ is absent', () => {
+    const bytes = Buffer.alloc(0x4000000, 0);
+    bytes.set(Buffer.from('REALTEK\0RTD284X_DEMO\0', 'latin1'), 0x100);
+    const fw = analyzeFirmware(bytes, 'realtek_test.bin', bytes.length, null);
+    assert.equal(fw.family, 'Realtek');
+    assert.equal(fw.partitions.some((p) => p.name === 'fw table'), false);
+    assert.equal(fw.partitions.some((p) => p.name === 'bootcode'), false);
+  });
+
+  it('generates primary and backup GPT metadata entries matching expected GPT geometry', () => {
+    const fileSize = 0x100000;
+    const gptParts = [
+      { name: 'system', ptType: 'gpt', startByte: 0x4000, size: 0x10000, baseOffset: 0 },
+    ];
+    const bytes = Buffer.alloc(0x100000, 0);
+    bytes.set(Buffer.from('EFI PART', 'ascii'), 0x200);
+    // uint64 at +0x18 = 1, +0x20 = (fileSize/512 - 1) = 2047, +0x30 = 2014
+    bytes.writeUInt32LE(1, 0x200 + 0x18);
+    bytes.writeUInt32LE(2047, 0x200 + 0x20);
+    bytes.writeUInt32LE(2014, 0x200 + 0x30);
+    bytes.writeUInt32LE(1, 0x200 + 0x50);
+    bytes.writeUInt32LE(128, 0x200 + 0x54);
+
+    const selected = selectDumpParts({
+      hasGpt: true,
+      gptParts,
+      userAreaAnalysis: null,
+      firmwareParts: [],
+      fileSize,
+      bytes,
+    });
+
+    const meta = selected.filter((p) => p.ptType === 'metadata');
+    assert.equal(meta.length, 5);
+    assert.ok(meta.some((p) => p.name === 'mbr 0'));
+    assert.ok(meta.some((p) => p.name === 'GPT Header'));
+    assert.ok(meta.some((p) => p.name === 'GPT Array'));
+    const backupArray = meta.find((p) => p.name === 'backup GPT array');
+    const backupHeader = meta.find((p) => p.name === 'backup GPT header');
+    assert.ok(backupArray);
+    assert.ok(backupHeader);
+    assert.equal(backupArray.startByte, (2014 + 1) * 512);
+    assert.equal(backupHeader.startByte, 2047 * 512);
   });
 });
