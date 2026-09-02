@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ShieldCheck } from 'lucide-react';
 import { crc32Init, crc32Update, crc32Final, toHex } from '@/lib/crc32';
+import { formatBytes } from '@/lib/binaryUtils';
 
 // CRC repair panel for multi-GB EMMC dumps. Reads the output blob in 4 MB chunks
 // to compute the checksum incrementally — never loads the full dump into memory.
@@ -9,7 +10,7 @@ export default function CrcPanelEmmc({ getOutputBlob, onDownload, disabled }) {
   const [stored, setStored] = useState(null);
   const [computed, setComputed] = useState(null);
   const [computing, setComputing] = useState(false);
-  const [progress, setProgress] = useState(0);
+  const [progressState, setProgressState] = useState(null);
   const width = config.variant === 'crc16_ccitt' ? 2 : 4;
   const set = (patch) => setConfig((c) => ({ ...c, ...patch }));
 
@@ -24,7 +25,7 @@ export default function CrcPanelEmmc({ getOutputBlob, onDownload, disabled }) {
     const blob = getOutputBlob();
     if (!blob) return;
     setComputing(true);
-    setProgress(0);
+    setProgressState({ percent: 0, processedBytes: 0, totalBytes: getCrcOffset(blob.size) });
     setStored(null);
     setComputed(null);
     try {
@@ -42,10 +43,11 @@ export default function CrcPanelEmmc({ getOutputBlob, onDownload, disabled }) {
         const end = Math.min(off + chunkSize, crcOffset);
         const buf = new Uint8Array(await blob.slice(off, end).arrayBuffer());
         crc = crc32Update(crc, buf);
-        setProgress(Math.round((off / crcOffset) * 100));
+        const percent = Math.round((end / crcOffset) * 100);
+        setProgressState({ percent, processedBytes: end, totalBytes: crcOffset });
       }
       setComputed(crc32Final(crc));
-      setProgress(100);
+      setProgressState({ percent: 100, processedBytes: crcOffset, totalBytes: crcOffset });
     } finally {
       setComputing(false);
     }
@@ -83,12 +85,18 @@ export default function CrcPanelEmmc({ getOutputBlob, onDownload, disabled }) {
           <p className={`font-mono text-sm ${mismatch ? 'text-rose-500' : 'text-emerald-600'}`}>{computed != null ? `0x${toHex(computed, width * 2)}` : '—'}</p>
         </div>
       </div>
-      {computing && (
-        <div>
-          <div className="h-1.5 rounded-full bg-muted overflow-hidden">
-            <div className="h-full bg-emerald-600 transition-all" style={{ width: `${progress}%` }} />
+      {progressState != null && (
+        <div className="space-y-1 rounded-lg border border-border bg-muted/20 p-2.5">
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <span>{computing ? 'Calculating CRC…' : 'CRC calculation complete'}</span>
+            <span className="font-mono">{progressState.percent}%</span>
           </div>
-          <p className="text-[10px] text-muted-foreground mt-1">Computing CRC… {progress}%</p>
+          <div className="h-2 rounded-full bg-muted overflow-hidden">
+            <div className="h-full bg-emerald-600 transition-all duration-150" style={{ width: `${progressState.percent}%` }} />
+          </div>
+          <p className="text-[10px] text-muted-foreground text-right font-mono">
+            Processed {formatBytes(progressState.processedBytes)} / {formatBytes(progressState.totalBytes)}
+          </p>
         </div>
       )}
       <div className="flex gap-2">

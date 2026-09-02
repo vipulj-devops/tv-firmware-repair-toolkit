@@ -18,6 +18,7 @@ import { isExt4 } from '@/lib/ext4';
 import { loadExplorePartition } from '@/lib/exploreSession';
 import { composeDumpBlob, getPartitionBlob as composePartitionBlob } from '@/lib/dumpCompose';
 import { scanFilesystems, scanFilesystemsAsync } from '@/lib/detectFilesystems';
+import { createZip, generateCollisionFreeNames } from '@/lib/zipWriter';
 import { crc32Init, crc32Update, crc32Final } from '@/lib/crc32';
 import { toast } from '@/components/ui/use-toast';
 import { Progress } from '@/components/ui/progress';
@@ -225,23 +226,51 @@ export default function EmmcTool() {
   const saveSelected = async () => {
     const toSave = parts.filter((p) => selected.has(p.name));
     if (!toSave.length) { toast({ variant: 'destructive', title: 'No partitions selected' }); return; }
+    const eligible = toSave.filter((p) => {
+      const readSize = p.availableSize ?? p.size;
+      return !p.unavailable && readSize > 0;
+    });
+    if (!eligible.length) {
+      toast({ variant: 'destructive', title: 'Save failed', description: 'Selected partitions are beyond physical dump EOF and cannot be saved.' });
+      return;
+    }
+
+    if (eligible.length === 1) {
+      savePartition(eligible[0]);
+      return;
+    }
+
     setBusy(true);
+    setProgress({ label: 'Creating ZIP for selected partitions…', percent: 0 });
     try {
-      for (const p of toSave) {
+      const namedFiles = generateCollisionFreeNames(eligible);
+      const zipFiles = [];
+      let count = 0;
+      for (const item of namedFiles) {
+        const p = item.partition;
         const blob = getPartitionBlob(p);
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `tvconfig_emmc/${p.name}.bin`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-        await new Promise((r) => setTimeout(r, 120));
+        const arrayBuf = await blob.arrayBuffer();
+        zipFiles.push({ name: item.fileName, data: new Uint8Array(arrayBuf) });
+        count++;
+        setProgress({ label: `Compressing ${item.fileName}…`, percent: Math.round((count / namedFiles.length) * 100) });
       }
-      addLog(`Saved ${toSave.length} selected partitions`);
-      toast({ title: 'Saved', description: `${toSave.length} partitions saved to tvconfig_emmc/` });
-    } finally { setBusy(false); }
+      const zipBlob = await createZip(zipFiles);
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'selected-partitions.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      addLog(`Saved ${eligible.length} selected partitions to selected-partitions.zip`);
+      toast({ title: 'Saved ZIP', description: `${eligible.length} partitions saved to selected-partitions.zip` });
+    } catch (e) {
+      toast({ variant: 'destructive', title: 'Export failed', description: e.message });
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
   };
 
   const replaceSelectedFiles = async (fileList) => {

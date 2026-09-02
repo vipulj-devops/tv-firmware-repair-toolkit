@@ -1,5 +1,5 @@
 // Minimal ZIP writer (STORE + DEFLATE-RAW via CompressionStream).
-import { crc32 } from '@/lib/crc32';
+import { crc32 } from './crc32.js';
 
 function u16dv(buf, off, val) { new DataView(buf.buffer).setUint16(off, val, true); }
 function u32dv(buf, off, val) { new DataView(buf.buffer).setUint32(off, val, true); }
@@ -105,4 +105,36 @@ export async function createZip(files) {
   parts.push(eocd);
 
   return new Blob(parts, { type: 'application/zip' });
+}
+
+export function generateCollisionFreeNames(partitions) {
+  if (!Array.isArray(partitions)) return [];
+  const counts = {};
+  for (const p of partitions) {
+    const base = (p && p.name ? p.name : 'partition').trim();
+    counts[base] = (counts[base] || 0) + 1;
+  }
+
+  const used = new Set();
+  const result = [];
+
+  for (const p of partitions) {
+    const base = (p && p.name ? p.name : 'partition').trim();
+    let fileName;
+    if (counts[base] === 1) {
+      fileName = `${base}.bin`;
+    } else {
+      const tag = (p.vendorSource || p.ptType || 'dup').toLowerCase().replace(/[^a-z0-9_\-]/g, '_');
+      fileName = `${base}_${tag}.bin`;
+      if (used.has(fileName)) {
+        let idx = 1;
+        while (used.has(`${base}_${tag}_${idx}.bin`)) idx++;
+        fileName = `${base}_${tag}_${idx}.bin`;
+      }
+    }
+    used.add(fileName);
+    result.push({ partition: p, fileName });
+  }
+
+  return result;
 }
