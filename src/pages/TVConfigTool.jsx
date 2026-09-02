@@ -42,6 +42,17 @@ export default function TVConfigTool() {
     setDirty(true);
   };
 
+  const editBytes = (edits) => {
+    if (!edits || !edits.length) return;
+    const next = new Uint8Array(bytes);
+    for (const edit of edits) {
+      if (edit.index < 0 || edit.index >= next.length) continue;
+      next[edit.index] = edit.after & 0xff;
+    }
+    setBytes(next);
+    setDirty(true);
+  };
+
   const patchString = (entry, newVal, maxLen) => {
     const next = new Uint8Array(bytes);
     // Only overwrite the value portion (after "key="), leaving the key intact.
@@ -236,6 +247,7 @@ export default function TVConfigTool() {
                   <HexViewer
                     bytes={bytes}
                     onEditByte={editByte}
+                    onEditBytes={editBytes}
                     highlight={crcHighlight}
                     onSave={download}
                   />

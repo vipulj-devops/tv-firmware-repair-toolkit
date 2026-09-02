@@ -98,7 +98,15 @@ export function createEditHistory() {
   return {
     pushEdit({ index, before, after }) {
       if (before === after) return false;
-      undoStack.push({ index, before, after });
+      undoStack.push({ index, before, after, isBatch: false });
+      redoStack = [];
+      return true;
+    },
+    pushBatch(edits) {
+      if (!edits || edits.length === 0) return false;
+      const filtered = edits.filter((e) => e.before !== e.after);
+      if (filtered.length === 0) return false;
+      undoStack.push({ edits: filtered, isBatch: true });
       redoStack = [];
       return true;
     },
@@ -112,12 +120,18 @@ export function createEditHistory() {
       if (undoStack.length === 0) return null;
       const entry = undoStack.pop();
       redoStack.push(entry);
+      if (entry.isBatch) {
+        return { isBatch: true, edits: entry.edits };
+      }
       return { index: entry.index, value: entry.before, entry };
     },
     redo() {
       if (redoStack.length === 0) return null;
       const entry = redoStack.pop();
       undoStack.push(entry);
+      if (entry.isBatch) {
+        return { isBatch: true, edits: entry.edits };
+      }
       return { index: entry.index, value: entry.after, entry };
     },
     clear() {
@@ -289,4 +303,62 @@ export function findAllMatches(haystack, needle) {
     from = idx + 1;
   }
   return results;
+}
+
+export function findNonOverlappingMatches(haystack, needle) {
+  if (!haystack || !needle || needle.length === 0) return [];
+  const results = [];
+  let from = 0;
+  while (true) {
+    const idx = findNextMatch(haystack, needle, from);
+    if (idx === -1) break;
+    results.push(idx);
+    from = idx + needle.length;
+  }
+  return results;
+}
+
+export function validateReplacementLength(searchNeedle, replaceNeedle) {
+  if (!searchNeedle || !replaceNeedle) return { ok: false, error: 'Invalid pattern.' };
+  if (searchNeedle.length !== replaceNeedle.length) {
+    return {
+      ok: false,
+      error: `Search (${searchNeedle.length} B) and replace (${replaceNeedle.length} B) must have the same byte length.`,
+    };
+  }
+  return { ok: true };
+}
+
+export function collectOverwriteEdits(haystack, start, replacement) {
+  if (!haystack || !replacement || replacement.length === 0) return [];
+  const edits = [];
+  for (let i = 0; i < replacement.length; i++) {
+    const index = start + i;
+    if (index < 0 || index >= haystack.length) break;
+    const before = haystack[index];
+    const after = replacement[i];
+    if (before !== after) edits.push({ index, before, after });
+  }
+  return edits;
+}
+
+export function collectNonOverlappingReplacementEdits(haystack, searchNeedle, replaceNeedle) {
+  const lengthCheck = validateReplacementLength(searchNeedle, replaceNeedle);
+  if (!lengthCheck.ok) return { ok: false, error: lengthCheck.error, edits: [] };
+  const matches = findNonOverlappingMatches(haystack, searchNeedle);
+  const edits = [];
+  for (const start of matches) {
+    edits.push(...collectOverwriteEdits(haystack, start, replaceNeedle));
+  }
+   return { ok: true, error: null, edits, matchCount: matches.length };
+}
+
+export function validateReplacementInputs(searchInput, replaceInput, mode) {
+  const searchParsed = parseSearchPattern(searchInput, mode);
+  if (!searchParsed.ok) return { ok: false, error: searchParsed.error, searchNeedle: null, replaceNeedle: null };
+  const replaceParsed = parseSearchPattern(replaceInput, mode);
+  if (!replaceParsed.ok) return { ok: false, error: replaceParsed.error, searchNeedle: null, replaceNeedle: null };
+  const lengthCheck = validateReplacementLength(searchParsed.needle, replaceParsed.needle);
+  if (!lengthCheck.ok) return { ok: false, error: lengthCheck.error, searchNeedle: searchParsed.needle, replaceNeedle: replaceParsed.needle };
+  return { ok: true, error: null, searchNeedle: searchParsed.needle, replaceNeedle: replaceParsed.needle };
 }

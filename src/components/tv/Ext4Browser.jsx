@@ -323,28 +323,52 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
 
   const dirtyFile = content !== origContent;
 
+  const applyEditsToRaw = (raw, edits) => {
+    for (const edit of edits) {
+      if (edit.index < 0 || edit.index >= raw.length) continue;
+      raw[edit.index] = edit.after & 0xff;
+    }
+  };
+
+  const persistRawEdits = async (raw) => {
+    if (memoryWritable) {
+      const next = new Uint8Array(bytes);
+      patchFile(next, selected.inode, sb, raw);
+      onPatched(next);
+      setRawBytes(raw);
+      setImgDirty(true);
+      return;
+    }
+    const alloc = await getAllocatedSpaceRange(reader, selected.inode, sb);
+    if (raw.length > alloc) throw new Error(INPLACE_TOO_LARGE_MESSAGE);
+    await patchExistingFileIo(reader, selected.inode, sb, raw);
+    onOverlayPatched?.();
+    setRawBytes(raw);
+    setImgDirty(true);
+  };
+
   const editByteInFile = async (index, value) => {
     if (!requireInPlace()) return;
     try {
-      if (memoryWritable) {
-        const raw = readFileBytes(bytes, selected.inode, sb);
-        raw[index] = value & 0xff;
-        const next = new Uint8Array(bytes);
-        patchFile(next, selected.inode, sb, raw);
-        onPatched(next);
-        setRawBytes(raw);
-        setImgDirty(true);
-        return;
-      }
-      const raw = await readFileBytesRange(reader, selected.inode, sb);
+      const raw = memoryWritable
+        ? readFileBytes(bytes, selected.inode, sb)
+        : await readFileBytesRange(reader, selected.inode, sb);
       raw[index] = value & 0xff;
-      const alloc = await getAllocatedSpaceRange(reader, selected.inode, sb);
-      if (raw.length > alloc) throw new Error(INPLACE_TOO_LARGE_MESSAGE);
-      await patchExistingFileIo(reader, selected.inode, sb, raw);
-      onOverlayPatched?.();
-      // Don't increment rangeRev for in-place edits (Issue #1 fix)
-      setRawBytes(raw);
-      setImgDirty(true);
+      await persistRawEdits(raw);
+    } catch (e) {
+      setError(e.message || String(e));
+      toast({ variant: 'destructive', title: 'Save failed', description: e.message || String(e) });
+    }
+  };
+
+  const editBytesInFile = async (edits) => {
+    if (!requireInPlace() || !edits?.length) return;
+    try {
+      const raw = memoryWritable
+        ? readFileBytes(bytes, selected.inode, sb)
+        : await readFileBytesRange(reader, selected.inode, sb);
+      applyEditsToRaw(raw, edits);
+      await persistRawEdits(raw);
     } catch (e) {
       setError(e.message || String(e));
       toast({ variant: 'destructive', title: 'Save failed', description: e.message || String(e) });
@@ -650,7 +674,11 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
           </div>
         ) : isBinary ? (
           <div className="rounded-md border border-input bg-background min-h-[360px] overflow-hidden">
-            <HexViewer bytes={rawBytes} onEditByte={inPlaceWritable ? editByteInFile : () => {}} />
+            <HexViewer
+              bytes={rawBytes}
+              onEditByte={inPlaceWritable ? editByteInFile : () => {}}
+              onEditBytes={inPlaceWritable ? editBytesInFile : () => {}}
+            />
           </div>
         ) : (
           <textarea value={content} onChange={(e) => setContent(e.target.value)} spellCheck={false}

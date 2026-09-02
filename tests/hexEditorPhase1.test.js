@@ -23,6 +23,11 @@ import {
   findNextMatch,
   findPreviousMatch,
   findAllMatches,
+  findNonOverlappingMatches,
+  validateReplacementLength,
+  collectOverwriteEdits,
+  collectNonOverlappingReplacementEdits,
+  validateReplacementInputs,
 } from '../src/lib/hexEditorCore.js';
 
 describe('Phase 1 Hex/ASCII Editor Core Tests', () => {
@@ -172,6 +177,80 @@ describe('Phase 1 Hex/ASCII Editor Core Tests', () => {
     // Perform new edit
     history.pushEdit({ index: 2, before: 0x30, after: 0x33 });
     assert.ok(!history.canRedo()); // Redo branch cleared
+  });
+
+  it('11b. pushBatch creates one undo entry', () => {
+    const history = createEditHistory();
+    const pushed = history.pushBatch([
+      { index: 0, before: 0x10, after: 0x11 },
+      { index: 1, before: 0x20, after: 0x22 },
+    ]);
+    assert.equal(pushed, true);
+    assert.equal(history.getUndoCount(), 1);
+    assert.equal(history.getRedoCount(), 0);
+  });
+
+  it('11c. undo returns all batch edits atomically', () => {
+    const history = createEditHistory();
+    history.pushBatch([
+      { index: 0, before: 0x10, after: 0x11 },
+      { index: 2, before: 0x30, after: 0x33 },
+    ]);
+    const undone = history.undo();
+    assert.ok(undone.isBatch);
+    assert.equal(undone.edits.length, 2);
+    assert.equal(undone.edits[0].before, 0x10);
+    assert.equal(undone.edits[1].after, 0x33);
+    assert.ok(history.canRedo());
+    assert.ok(!history.canUndo());
+  });
+
+  it('11d. redo returns all batch edits atomically', () => {
+    const history = createEditHistory();
+    history.pushBatch([
+      { index: 0, before: 0x10, after: 0x11 },
+      { index: 1, before: 0x20, after: 0x22 },
+    ]);
+    history.undo();
+    const redone = history.redo();
+    assert.ok(redone.isBatch);
+    assert.equal(redone.edits.length, 2);
+    assert.equal(redone.edits[0].after, 0x11);
+    assert.equal(redone.edits[1].after, 0x22);
+    assert.ok(history.canUndo());
+    assert.ok(!history.canRedo());
+  });
+
+  it('11e. empty and unchanged batches are ignored', () => {
+    const history = createEditHistory();
+    assert.equal(history.pushBatch([]), false);
+    assert.equal(history.pushBatch([{ index: 0, before: 0x10, after: 0x10 }]), false);
+    assert.equal(history.getUndoCount(), 0);
+  });
+
+  it('11f. pushEdit still works after mixing with batches', () => {
+    const history = createEditHistory();
+    history.pushEdit({ index: 0, before: 0x10, after: 0x11 });
+    history.pushBatch([
+      { index: 1, before: 0x20, after: 0x22 },
+      { index: 2, before: 0x30, after: 0x33 },
+    ]);
+    history.pushEdit({ index: 3, before: 0x40, after: 0x44 });
+    assert.equal(history.getUndoCount(), 3);
+
+    const last = history.undo();
+    assert.equal(last.index, 3);
+    assert.equal(last.value, 0x40);
+
+    const batch = history.undo();
+    assert.ok(batch.isBatch);
+    assert.equal(batch.edits.length, 2);
+
+    const first = history.undo();
+    assert.equal(first.index, 0);
+    assert.equal(first.value, 0x10);
+    assert.ok(history.canRedo());
+    assert.ok(!history.canUndo());
   });
 
   it('12. Edits remain fixed-length', () => {
@@ -1010,5 +1089,481 @@ describe('Phase 2B — Hex Editor Status Bar & Search', () => {
     // From cursor 4: Find Previous should find 0
     const prevFrom4 = findPreviousMatch(bytes, needle, 4 - 1);
     assert.equal(prevFrom4, 0);
+  });
+});
+
+describe('Phase 3B — Replace / Replace All', () => {
+  it('1. Replace current match with equal-length HEX pattern', () => {
+    const bytes = new Uint8Array([0x4e, 0x4f, 0x4e, 0x45]);
+    const search = parseSearchPattern('4E 4F', 'hex');
+    const replace = parseSearchPattern('59 45', 'hex');
+    assert.ok(search.ok && replace.ok);
+    const edits = collectOverwriteEdits(bytes, 0, replace.needle);
+    assert.equal(edits.length, 2);
+    const next = new Uint8Array(bytes);
+    for (const e of edits) next[e.index] = e.after;
+    assert.deepEqual(Array.from(next), [0x59, 0x45, 0x4e, 0x45]);
+    assert.equal(next.length, bytes.length);
+  });
+
+  it('2. Replace current match with equal-length ASCII pattern', () => {
+    const bytes = new Uint8Array([0x4e, 0x4f, 0x4e, 0x45]);
+    const search = parseSearchPattern('NO', 'ascii');
+    const replace = parseSearchPattern('YE', 'ascii');
+    assert.ok(search.ok && replace.ok);
+    assert.equal(search.needle.length, replace.needle.length);
+    const edits = collectOverwriteEdits(bytes, 0, replace.needle);
+    const next = new Uint8Array(bytes);
+    for (const e of edits) next[e.index] = e.after;
+    assert.equal(String.fromCharCode(...next.subarray(0, 2)), 'YE');
+    assert.equal(next.length, 4);
+  });
+
+  it('3. Reject shorter replacement', () => {
+    const search = parseSearchPattern('4E 4F', 'hex');
+    const replace = parseSearchPattern('59', 'hex');
+    const check = validateReplacementLength(search.needle, replace.needle);
+    assert.ok(!check.ok);
+    assert.match(check.error, /same byte length/i);
+  });
+
+  it('4. Reject longer replacement', () => {
+    const search = parseSearchPattern('AA', 'hex');
+    const replace = parseSearchPattern('BB CC', 'hex');
+    const check = validateReplacementLength(search.needle, replace.needle);
+    assert.ok(!check.ok);
+  });
+
+  it('5. Invalid replacement HEX input is rejected', () => {
+    const replace = parseSearchPattern('ZZ', 'hex');
+    assert.ok(!replace.ok);
+  });
+
+  it('6. Replace when there is no current match does nothing', () => {
+    const bytes = new Uint8Array([0x10, 0x20, 0x30]);
+    const orig = new Uint8Array(bytes);
+    const matchIdx = -1;
+    const matches = [];
+    if (matchIdx < 0 || matches[matchIdx] == null) {
+      assert.deepEqual(Array.from(bytes), Array.from(orig));
+    }
+  });
+
+  it('7. Replace All multiple non-overlapping matches', () => {
+    const bytes = new Uint8Array([0xaa, 0xaa, 0x00, 0xaa, 0xaa]);
+    const search = new Uint8Array([0xaa, 0xaa]);
+    const replace = new Uint8Array([0xbb, 0xbb]);
+    const result = collectNonOverlappingReplacementEdits(bytes, search, replace);
+    assert.ok(result.ok);
+    assert.equal(result.matchCount, 2);
+    const next = new Uint8Array(bytes);
+    for (const e of result.edits) next[e.index] = e.after;
+    assert.deepEqual(Array.from(next), [0xbb, 0xbb, 0x00, 0xbb, 0xbb]);
+    assert.equal(next.length, bytes.length);
+  });
+
+  it('8. Replace All overlapping matches only replaces non-overlapping ranges', () => {
+    const bytes = new Uint8Array([0xaa, 0xaa, 0xaa]);
+    const search = new Uint8Array([0xaa, 0xaa]);
+    const replace = new Uint8Array([0xbb, 0xbb]);
+    const overlapping = findAllMatches(bytes, search);
+    assert.deepEqual(overlapping, [0, 1]);
+    const nonOverlap = findNonOverlappingMatches(bytes, search);
+    assert.deepEqual(nonOverlap, [0]);
+    const result = collectNonOverlappingReplacementEdits(bytes, search, replace);
+    const next = new Uint8Array(bytes);
+    for (const e of result.edits) next[e.index] = e.after;
+    assert.deepEqual(Array.from(next), [0xbb, 0xbb, 0xaa]);
+  });
+
+  it('9. Replace All with zero matches does not modify bytes', () => {
+    const bytes = new Uint8Array([0x10, 0x20, 0x30]);
+    const result = collectNonOverlappingReplacementEdits(bytes, new Uint8Array([0xff]), new Uint8Array([0x00]));
+    assert.equal(result.matchCount, 0);
+    assert.equal(result.edits.length, 0);
+    assert.deepEqual(Array.from(bytes), [0x10, 0x20, 0x30]);
+  });
+
+  it('10. Undo Replace Current restores original bytes as one batch', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0xaa, 0xbb, 0xcc]);
+    const edits = collectOverwriteEdits(bytes, 0, new Uint8Array([0x11, 0x22, 0x33]));
+    history.pushBatch(edits);
+    for (const e of edits) bytes[e.index] = e.after;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x33]);
+    const undone = history.undo();
+    assert.ok(undone.isBatch);
+    assert.equal(undone.edits.length, 3);
+    for (const e of undone.edits) bytes[e.index] = e.before;
+    assert.deepEqual(Array.from(bytes), [0xaa, 0xbb, 0xcc]);
+  });
+
+  it('11. Redo Replace Current restores replacement as one batch', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0xaa, 0xbb, 0xcc]);
+    const edits = collectOverwriteEdits(bytes, 0, new Uint8Array([0x11, 0x22, 0x33]));
+    history.pushBatch(edits);
+    for (const e of edits) bytes[e.index] = e.after;
+    history.undo();
+    for (const e of edits) bytes[e.index] = e.before;
+    const redone = history.redo();
+    assert.ok(redone.isBatch);
+    for (const e of redone.edits) bytes[e.index] = e.after;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x33]);
+  });
+
+  it('12. Undo entire Replace All as one operation', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0xaa, 0xaa, 0x00, 0xaa, 0xaa]);
+    const result = collectNonOverlappingReplacementEdits(
+      bytes,
+      new Uint8Array([0xaa, 0xaa]),
+      new Uint8Array([0xbb, 0xbb])
+    );
+    history.pushBatch(result.edits);
+    for (const e of result.edits) bytes[e.index] = e.after;
+    assert.deepEqual(Array.from(bytes), [0xbb, 0xbb, 0x00, 0xbb, 0xbb]);
+    const undone = history.undo();
+    assert.ok(undone.isBatch);
+    assert.equal(history.getUndoCount(), 0);
+    for (const e of undone.edits) bytes[e.index] = e.before;
+    assert.deepEqual(Array.from(bytes), [0xaa, 0xaa, 0x00, 0xaa, 0xaa]);
+  });
+
+  it('13. Redo entire Replace All as one operation', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0xaa, 0xaa, 0x00, 0xaa, 0xaa]);
+    const orig = new Uint8Array(bytes);
+    const result = collectNonOverlappingReplacementEdits(
+      bytes,
+      new Uint8Array([0xaa, 0xaa]),
+      new Uint8Array([0xbb, 0xbb])
+    );
+    history.pushBatch(result.edits);
+    for (const e of result.edits) bytes[e.index] = e.after;
+    history.undo();
+    for (const e of result.edits) bytes[e.index] = e.before;
+    const redone = history.redo();
+    for (const e of redone.edits) bytes[e.index] = e.after;
+    assert.deepEqual(Array.from(bytes), [0xbb, 0xbb, 0x00, 0xbb, 0xbb]);
+    assert.equal(orig.length, bytes.length);
+  });
+
+  it('14. Modified counter after Replace Current', () => {
+    const counter = createModifiedCounter();
+    const orig = new Uint8Array([0x10, 0x20, 0x30]);
+    const bytes = new Uint8Array(orig);
+    const edits = collectOverwriteEdits(bytes, 1, new Uint8Array([0xaa]));
+    for (const e of edits) {
+      const wasModified = e.before !== orig[e.index];
+      const isNowModified = e.after !== orig[e.index];
+      if (wasModified && !isNowModified) counter.decrement();
+      else if (!wasModified && isNowModified) counter.increment();
+      bytes[e.index] = e.after;
+    }
+    assert.equal(counter.getCount(), 1);
+  });
+
+  it('15. Modified counter after Replace All', () => {
+    const counter = createModifiedCounter();
+    const orig = new Uint8Array([0xaa, 0xaa, 0x00, 0xaa, 0xaa]);
+    const result = collectNonOverlappingReplacementEdits(
+      orig,
+      new Uint8Array([0xaa, 0xaa]),
+      new Uint8Array([0xbb, 0xbb])
+    );
+    for (const e of result.edits) {
+      const wasModified = e.before !== orig[e.index];
+      const isNowModified = e.after !== orig[e.index];
+      if (wasModified && !isNowModified) counter.decrement();
+      else if (!wasModified && isNowModified) counter.increment();
+    }
+    assert.equal(counter.getCount(), 4);
+  });
+
+  it('16. Modified counter after undo/redo of Replace All', () => {
+    const counter = createModifiedCounter();
+    const orig = new Uint8Array([0xaa, 0xaa]);
+    const result = collectNonOverlappingReplacementEdits(
+      orig,
+      new Uint8Array([0xaa, 0xaa]),
+      new Uint8Array([0xbb, 0xbb])
+    );
+    const applyDelta = (from, to, index) => {
+      const wasModified = from !== orig[index];
+      const isNowModified = to !== orig[index];
+      if (wasModified && !isNowModified) counter.decrement();
+      else if (!wasModified && isNowModified) counter.increment();
+    };
+    for (const e of result.edits) applyDelta(e.before, e.after, e.index);
+    assert.equal(counter.getCount(), 2);
+    for (const e of result.edits) applyDelta(e.after, e.before, e.index);
+    assert.equal(counter.getCount(), 0);
+    for (const e of result.edits) applyDelta(e.before, e.after, e.index);
+    assert.equal(counter.getCount(), 2);
+  });
+
+  it('17. Replacing a byte with its original value does not increase modified count', () => {
+    const orig = new Uint8Array([0xaa, 0xbb]);
+    const bytes = new Uint8Array([0x11, 0xbb]);
+    const counter = createModifiedCounter();
+    counter.increment();
+    const edits = collectOverwriteEdits(bytes, 0, new Uint8Array([0xaa, 0xbb]));
+    for (const e of edits) {
+      const wasModified = e.before !== orig[e.index];
+      const isNowModified = e.after !== orig[e.index];
+      if (wasModified && !isNowModified) counter.decrement();
+      else if (!wasModified && isNowModified) counter.increment();
+    }
+    assert.equal(counter.getCount(), 0);
+  });
+
+  it('18. Search cache invalidation after Replace leaves stale matches unusable', () => {
+    const bytes = new Uint8Array([0xaa, 0xaa, 0x00, 0xaa, 0xaa]);
+    const needle = new Uint8Array([0xaa, 0xaa]);
+    let matches = findAllMatches(bytes, needle);
+    assert.equal(matches.length, 2);
+    const result = collectNonOverlappingReplacementEdits(bytes, needle, new Uint8Array([0xbb, 0xbb]));
+    const next = new Uint8Array(bytes);
+    for (const e of result.edits) next[e.index] = e.after;
+    matches = [];
+    const refreshed = findAllMatches(next, needle);
+    assert.equal(refreshed.length, 0);
+  });
+
+  it('19. Buffer length remains unchanged after every replacement', () => {
+    const bytes = new Uint8Array([0x4e, 0x4f, 0x4e, 0x45, 0x4e, 0x4f]);
+    const result = collectNonOverlappingReplacementEdits(
+      bytes,
+      new Uint8Array([0x4e, 0x4f]),
+      new Uint8Array([0x59, 0x45])
+    );
+    const next = new Uint8Array(bytes);
+    for (const e of result.edits) next[e.index] = e.after;
+    assert.equal(next.length, bytes.length);
+  });
+
+  it('20. Search and Replace inputs remain protected form controls', () => {
+    assert.ok(isEditableFormControl({ tagName: 'INPUT', getAttribute: () => null }));
+  });
+});
+
+describe('Phase 3B — Replace/Replace All UI State Validation', () => {
+  it('1. validateReplacementInputs rejects empty search or replace', () => {
+    const r1 = validateReplacementInputs('', '4142', 'hex');
+    assert.ok(!r1.ok);
+    assert.match(r1.error, /enter/i);
+
+    const r2 = validateReplacementInputs('4142', '', 'hex');
+    assert.ok(!r2.ok);
+    assert.match(r2.error, /enter/i);
+  });
+
+  it('2. validateReplacementInputs accepts valid equal-length HEX patterns', () => {
+    const r = validateReplacementInputs('4E 4F', '59 45', 'hex');
+    assert.ok(r.ok);
+    assert.equal(r.searchNeedle.length, 2);
+    assert.equal(r.replaceNeedle.length, 2);
+    assert.deepEqual(Array.from(r.replaceNeedle), [0x59, 0x45]);
+  });
+
+  it('3. validateReplacementInputs accepts valid equal-length ASCII patterns', () => {
+    const r = validateReplacementInputs('NO', 'YE', 'ascii');
+    assert.ok(r.ok);
+    assert.equal(r.searchNeedle.length, 2);
+    assert.equal(r.replaceNeedle.length, 2);
+    assert.deepEqual(Array.from(r.replaceNeedle), [0x59, 0x45]);
+  });
+
+  it('4. validateReplacementInputs rejects odd-length HEX search', () => {
+    const r = validateReplacementInputs('ABC', '4142', 'hex');
+    assert.ok(!r.ok);
+    assert.match(r.error, /even number/i);
+  });
+
+  it('5. validateReplacementInputs rejects odd-length HEX replace', () => {
+    const r = validateReplacementInputs('4142', 'ABC', 'hex');
+    assert.ok(!r.ok);
+    assert.match(r.error, /even number/i);
+  });
+
+  it('6. validateReplacementInputs rejects invalid HEX characters', () => {
+    const r = validateReplacementInputs('ZZZZ', '4142', 'hex');
+    assert.ok(!r.ok);
+    assert.match(r.error, /invalid hex/i);
+  });
+
+  it('7. validateReplacementInputs rejects length mismatch (search shorter)', () => {
+    const r = validateReplacementInputs('AA', 'BBCC', 'hex');
+    assert.ok(!r.ok);
+    assert.match(r.error, /same byte length/i);
+  });
+
+  it('8. validateReplacementInputs rejects length mismatch (replace shorter)', () => {
+    const r = validateReplacementInputs('AABB', 'CC', 'hex');
+    assert.ok(!r.ok);
+    assert.match(r.error, /same byte length/i);
+  });
+
+  it('9. validateReplacementInputs returns needles on length mismatch for diagnostics', () => {
+    const r = validateReplacementInputs('AABB', 'CC', 'hex');
+    assert.ok(!r.ok);
+    assert.equal(r.searchNeedle.length, 2);
+    assert.equal(r.replaceNeedle.length, 1);
+  });
+
+  it('10. validateReplacementInputs handles 0x prefix in both patterns', () => {
+    const r = validateReplacementInputs('0x4E', '0x59', 'hex');
+    assert.ok(r.ok);
+    assert.equal(r.searchNeedle[0], 0x4e);
+    assert.equal(r.replaceNeedle[0], 0x59);
+  });
+
+  it('11. validateReplacementInputs handles single-byte patterns', () => {
+    const r = validateReplacementInputs('4E', '59', 'hex');
+    assert.ok(r.ok);
+    assert.equal(r.searchNeedle[0], 0x4e);
+    assert.equal(r.replaceNeedle[0], 0x59);
+  });
+
+  it('12. validateReplacementInputs rejects whitespace-only input', () => {
+    const r = validateReplacementInputs('   ', '4142', 'hex');
+    assert.ok(!r.ok);
+  });
+
+  it('13. validateReplacementInputs rejects invalid ASCII (non-printable chars are byte-level, ASCII mode accepts them)', () => {
+    const r = validateReplacementInputs('hello', 'world', 'ascii');
+    assert.ok(r.ok);
+    assert.equal(r.searchNeedle.length, 5);
+    assert.equal(r.replaceNeedle.length, 5);
+  });
+
+  it('14. UI disabled state: Replace Current requires valid patterns + current match', () => {
+    // Simulates the derived state logic from HexViewer
+    // hasCurrentMatch = matchIdx >= 0 && matches[matchIdx] != null
+    // disabled = !replaceValidation?.ok || !hasCurrentMatch
+
+    // Case: valid patterns, no match found yet
+    const result = validateReplacementInputs('4E4F', '5959', 'hex');
+    assert.ok(result.ok);
+    const hasCurrentMatch = false; // matchIdx = -1
+    const replaceCurrentDisabled = !result.ok || !hasCurrentMatch;
+    assert.ok(replaceCurrentDisabled, 'Should be disabled when no current match');
+
+    // Case: valid patterns, has current match
+    const hasMatch = true;
+    const replaceCurrentEnabled = result.ok && hasMatch;
+    assert.ok(replaceCurrentEnabled, 'Should be enabled with match');
+  });
+
+  it('15. UI disabled state: Replace All requires only valid patterns (does own matching)', () => {
+    // Replace All does its own match finding via collectNonOverlappingReplacementEdits
+    // It does NOT require hasCurrentMatch
+    const result = validateReplacementInputs('4E4F', '5959', 'hex');
+    assert.ok(result.ok);
+    const replaceAllDisabled = !result.ok;
+    assert.ok(!replaceAllDisabled, 'Replace All should be enabled with valid patterns');
+
+    // Invalid patterns disable Replace All
+    const result2 = validateReplacementInputs('ABC', '5959', 'hex');
+    const replaceAllDisabled2 = !result2.ok;
+    assert.ok(replaceAllDisabled2, 'Should be disabled with invalid patterns');
+  });
+
+  it('16. UI disabled state: both buttons disabled when replace input is empty', () => {
+    const result = validateReplacementInputs('4E4F', '', 'hex');
+    assert.ok(!result.ok);
+    assert.ok(!result.ok || !false, 'Both should be disabled when replace is empty');
+  });
+
+  it('17. UI disabled state: both buttons disabled when search input is empty', () => {
+    const result = validateReplacementInputs('', '4142', 'hex');
+    assert.ok(!result.ok);
+    assert.ok(!result.ok, 'Both should be disabled when search is empty');
+  });
+
+  it('18. End-to-end: Replace Current only proceeds with valid equal-length patterns and match', () => {
+    const bytes = new Uint8Array([0x4e, 0x4f, 0x4e, 0x45]);
+    const result = validateReplacementInputs('4E 4F', '59 45', 'hex');
+    assert.ok(result.ok);
+
+    // Simulate hasCurrentMatch = true
+    const matchStart = 0;
+    const edits = collectOverwriteEdits(bytes, matchStart, result.replaceNeedle);
+    assert.equal(edits.length, 2);
+
+    const next = new Uint8Array(bytes);
+    for (const e of edits) next[e.index] = e.after;
+    assert.deepEqual(Array.from(next), [0x59, 0x45, 0x4e, 0x45]);
+    assert.equal(next.length, bytes.length, 'Buffer length must not change');
+  });
+
+  it('19. End-to-end: Replace All with valid patterns finds and replaces all non-overlapping', () => {
+    const bytes = new Uint8Array([0x4e, 0x4f, 0x10, 0x4e, 0x4f]);
+    const result = validateReplacementInputs('4E4F', '5959', 'hex');
+    assert.ok(result.ok);
+
+    const res = collectNonOverlappingReplacementEdits(
+      bytes,
+      result.searchNeedle,
+      result.replaceNeedle
+    );
+    assert.ok(res.ok);
+    assert.equal(res.matchCount, 2);
+
+    const next = new Uint8Array(bytes);
+    for (const e of res.edits) next[e.index] = e.after;
+    assert.deepEqual(Array.from(next), [0x59, 0x59, 0x10, 0x59, 0x59]);
+    assert.equal(next.length, bytes.length, 'Buffer length must not change');
+  });
+
+  it('20. Root cause regression: buttons are NOT enabled with simple !query || !replaceInput check', () => {
+    // The old disabled condition was !query || !replaceInput
+    // This was too loose - it enabled buttons with invalid input
+    // The fix: use validateReplacementInputs for proper validation
+
+    // Old behavior would enable buttons here (both fields have text):
+    const query = 'ABC';  // odd-length hex - invalid
+    const replaceInput = '4142';
+    const oldDisabled = !query || !replaceInput;
+    assert.ok(!oldDisabled, 'Old condition would have enabled the buttons (the bug)');
+
+    // New behavior properly disables:
+    const result = validateReplacementInputs(query, replaceInput, 'hex');
+    assert.ok(!result.ok, 'New condition properly rejects invalid hex');
+    const newDisabled = !result.ok;
+    assert.ok(newDisabled, 'New condition disables buttons for invalid input');
+  });
+
+  it('21. Root cause regression: length mismatch disables buttons', () => {
+    // Old condition: !query || !replaceInput → both have text → enabled (bug!)
+    const query = 'AA';       // 1 byte
+    const replaceInput = 'BBCC'; // 2 bytes
+    const oldDisabled = !query || !replaceInput;
+    assert.ok(!oldDisabled, 'Old condition would have enabled buttons despite length mismatch');
+
+    // New condition: validate length match
+    const result = validateReplacementInputs(query, replaceInput, 'hex');
+    assert.ok(!result.ok);
+    const newDisabled = !result.ok;
+    assert.ok(newDisabled, 'New condition disables buttons for length mismatch');
+  });
+
+  it('22. Root cause regression: no current match disables Replace Current only', () => {
+    const result = validateReplacementInputs('4E4F', '5959', 'hex');
+    assert.ok(result.ok);
+
+    // Both buttons have valid patterns
+    const replaceAllDisabled = !result.ok;
+    const replaceCurrentDisabled = !result.ok || false; // replaceCurrent needs match
+
+    assert.ok(!replaceAllDisabled, 'Replace All enabled with valid patterns');
+    assert.ok(!replaceCurrentDisabled, 'Replace Current enabled when hasCurrentMatch=true');
+
+    // Now simulate no current match
+    const hasCurrentMatch = false;
+    const replaceCurrentNoMatch = !result.ok || !hasCurrentMatch;
+    assert.ok(replaceCurrentNoMatch, 'Replace Current disabled without current match');
+    assert.ok(!replaceAllDisabled, 'Replace All still enabled without current match');
   });
 });

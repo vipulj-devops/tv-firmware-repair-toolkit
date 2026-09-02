@@ -19,14 +19,18 @@ import {
   findNextMatch,
   findPreviousMatch,
   findAllMatches,
+  collectOverwriteEdits,
+  collectNonOverlappingReplacementEdits,
+  validateReplacementInputs,
 } from '@/lib/hexEditorCore';
 
 const ROW_BYTES = 16;
 const ROW_HEIGHT = 22; // px
 
-export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highlight, onSave }) {
+export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEditBytes, highlight, onSave }) {
   const [copied, setCopied] = useState(null);
   const [query, setQuery] = useState('');
+  const [replaceInput, setReplaceInput] = useState('');
   const [searchMode, setSearchMode] = useState('hex'); // 'hex' | 'ascii'
   const [matches, setMatches] = useState([]);
   const [matchIdx, setMatchIdx] = useState(-1);
@@ -169,6 +173,15 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
     ? { start: matches[matchIdx], end: matches[matchIdx] + needleLen - 1 }
     : null;
 
+  const hasCurrentMatch = matchIdx >= 0 && matches[matchIdx] != null;
+
+  const replaceValidation = useMemo(() => {
+    const q = query.trim();
+    const r = replaceInput.trim();
+    if (!q || !r) return null;
+    return validateReplacementInputs(q, r, searchMode);
+  }, [query, replaceInput, searchMode]);
+
   // Check if an index is within the current (active) match
   const isCurrentMatch = (idx) => {
     return matchRange && idx >= matchRange.start && idx <= matchRange.end;
@@ -192,6 +205,23 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
     }
   }, [cursorIndex, bytes]);
 
+  const applyModifiedDelta = (index, fromValue, toValue) => {
+    const origBytes = origBytesRef.current;
+    const wasModified = origBytes ? fromValue !== origBytes[index] : false;
+    const isNowModified = origBytes ? toValue !== origBytes[index] : true;
+    if (wasModified && !isNowModified) modifiedCounterRef.current.decrement();
+    else if (!wasModified && isNowModified) modifiedCounterRef.current.increment();
+  };
+
+  const applyEdits = (edits) => {
+    if (!edits || !edits.length) return;
+    if (onEditBytes) {
+      onEditBytes(edits);
+      return;
+    }
+    for (const edit of edits) onEditByte?.(edit.index, edit.after);
+  };
+
   // Edit execution & Undo / Redo
   const commitEdit = (index, newValue) => {
     if (!bytes || index < 0 || index >= bytes.length) return;
@@ -199,11 +229,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
     if (before === newValue) return;
     const pushed = historyRef.current.pushEdit({ index, before, after: newValue });
     if (pushed) {
-      const origBytes = origBytesRef.current;
-      const wasModified = origBytes ? before !== origBytes[index] : false;
-      const isNowModified = origBytes ? newValue !== origBytes[index] : true;
-      if (wasModified && !isNowModified) modifiedCounterRef.current.decrement();
-      else if (!wasModified && isNowModified) modifiedCounterRef.current.increment();
+      applyModifiedDelta(index, before, newValue);
       onEditByte?.(index, newValue);
       setHistoryTick((t) => t + 1);
     }
@@ -211,32 +237,57 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
 
   const handleUndo = () => {
     const item = historyRef.current.undo();
-    if (item) {
-      const origBytes = origBytesRef.current;
-      const afterModified = origBytes ? item.entry.after !== origBytes[item.index] : true;
-      const beforeModified = origBytes ? item.entry.before !== origBytes[item.index] : false;
-      if (afterModified && !beforeModified) modifiedCounterRef.current.decrement();
-      else if (!afterModified && beforeModified) modifiedCounterRef.current.increment();
+    if (!item) return;
+    if (item.isBatch) {
+      for (const edit of item.edits) {
+        applyModifiedDelta(edit.index, edit.after, edit.before);
+      }
+      applyEdits(item.edits.map((edit) => ({ index: edit.index, after: edit.before })));
+    } else {
+      applyModifiedDelta(item.index, item.entry.after, item.entry.before);
       onEditByte?.(item.index, item.value);
       setCursorIndex(item.index);
       setAnchorIndex(item.index);
-      setHistoryTick((t) => t + 1);
     }
+    setHistoryTick((t) => t + 1);
   };
 
   const handleRedo = () => {
     const item = historyRef.current.redo();
-    if (item) {
-      const origBytes = origBytesRef.current;
-      const beforeModified = origBytes ? item.entry.before !== origBytes[item.index] : false;
-      const afterModified = origBytes ? item.entry.after !== origBytes[item.index] : true;
-      if (beforeModified && !afterModified) modifiedCounterRef.current.decrement();
-      else if (!beforeModified && afterModified) modifiedCounterRef.current.increment();
+    if (!item) return;
+    if (item.isBatch) {
+      for (const edit of item.edits) {
+        applyModifiedDelta(edit.index, edit.before, edit.after);
+      }
+      applyEdits(item.edits);
+    } else {
+      applyModifiedDelta(item.index, item.entry.before, item.entry.after);
       onEditByte?.(item.index, item.value);
       setCursorIndex(item.index);
       setAnchorIndex(item.index);
-      setHistoryTick((t) => t + 1);
     }
+    setHistoryTick((t) => t + 1);
+  };
+
+  const invalidateSearchCache = () => {
+    lastMatchesRef.current = [];
+    setMatches([]);
+    setMatchIdx(-1);
+  };
+
+  const parseReplacePatterns = () => {
+    return validateReplacementInputs(query, replaceInput, searchMode);
+  };
+
+  const commitBatchEdits = (edits) => {
+    if (!edits.length) return false;
+    const pushed = historyRef.current.pushBatch(edits);
+    if (!pushed) return false;
+    for (const edit of edits) applyModifiedDelta(edit.index, edit.before, edit.after);
+    applyEdits(edits);
+    setHistoryTick((t) => t + 1);
+    invalidateSearchCache();
+    return true;
   };
 
   const handleGotoOffset = () => {
@@ -355,8 +406,49 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
   const handleFindNext = () => doFind('next');
   const handleFindPrevious = () => doFind('previous');
 
+  const handleReplaceCurrent = () => {
+    if (!bytes || bytes.length === 0) return;
+    setSearchError(null);
+    const parsed = parseReplacePatterns();
+    if (!parsed.ok) { setSearchError(parsed.error); return; }
+    if (matchIdx < 0 || matches[matchIdx] == null) {
+      setSearchError('No current match to replace.');
+      return;
+    }
+    const matchStart = matches[matchIdx];
+    const edits = collectOverwriteEdits(bytes, matchStart, parsed.replaceNeedle);
+    if (!edits.length) {
+      setSearchError('Replace value is identical to the current match.');
+      return;
+    }
+    commitBatchEdits(edits);
+  };
+
+  const handleReplaceAll = () => {
+    if (!bytes || bytes.length === 0) return;
+    setSearchError(null);
+    const parsed = parseReplacePatterns();
+    if (!parsed.ok) { setSearchError(parsed.error); return; }
+    const result = collectNonOverlappingReplacementEdits(
+      bytes,
+      parsed.searchNeedle,
+      parsed.replaceNeedle
+    );
+    if (!result.ok) { setSearchError(result.error); return; }
+    if (!result.matchCount) {
+      setSearchError('No matches found.');
+      return;
+    }
+    if (!result.edits.length) {
+      setSearchError('Replace value is identical to all matches.');
+      return;
+    }
+    commitBatchEdits(result.edits);
+  };
+
   const handleClearSearch = () => {
     setQuery('');
+    setReplaceInput('');
     setMatches([]);
     setMatchIdx(-1);
     setNeedleLen(0);
@@ -592,6 +684,42 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
         {gotoError && (
           <span className="text-[10px] text-rose-500 max-w-48 truncate" title={gotoError}>
             {gotoError}
+          </span>
+        )}
+      </div>
+      <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-border bg-card">
+        <span className="text-[11px] text-muted-foreground shrink-0">Replace:</span>
+        <input
+          value={replaceInput}
+          onChange={(e) => { setReplaceInput(e.target.value); setSearchError(null); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleReplaceCurrent(); } }}
+          placeholder={searchMode === 'hex' ? 'hex bytes…' : 'ASCII text…'}
+          className={`w-40 rounded-md border bg-background px-2 py-1 text-xs font-mono outline-none ${replaceValidation?.ok === false ? 'border-rose-500 focus:ring-rose-500/40' : replaceInput ? 'border-emerald-500/50 focus:ring-emerald-500/40' : 'border-input focus:ring-emerald-500/40'} focus:ring-2`}
+        />
+        <button
+          onClick={handleReplaceCurrent}
+          disabled={!replaceValidation?.ok || !hasCurrentMatch}
+          title="Replace current match (overwrite only, identical length required)"
+          className="flex items-center gap-1 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-40 px-2.5 py-1 transition-colors"
+        >
+          Replace
+        </button>
+        <button
+          onClick={handleReplaceAll}
+          disabled={!replaceValidation?.ok}
+          title="Replace all matches (overwrite only, identical length required)"
+          className="flex items-center gap-1 text-xs rounded-md border border-border hover:bg-accent disabled:opacity-40 px-2.5 py-1 transition-colors"
+        >
+          Replace All
+        </button>
+        {replaceValidation?.ok === false && replaceValidation.error && (
+          <span className="text-[10px] text-rose-500 max-w-xs truncate" title={replaceValidation.error}>
+            {replaceValidation.error}
+          </span>
+        )}
+        {!hasCurrentMatch && replaceValidation?.ok && query && (
+          <span className="text-[10px] text-muted-foreground">
+            Find a match to enable Replace
           </span>
         )}
       </div>
