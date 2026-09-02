@@ -192,3 +192,32 @@ export function clampGotoOffset(offset, length) {
 export function getRowForOffset(offset, rowBytes = 16) {
   return Math.floor(offset / rowBytes);
 }
+
+export function formatOffsetLabel(offset) {
+  const o = Math.max(0, Math.floor(offset || 0));
+  let hex = o.toString(16).toUpperCase().padStart(8, '0');
+  return `0x${hex}`;
+}
+
+export function formatByteValue(byteVal) {
+  if (byteVal == null || byteVal < 0 || byteVal > 255) return '--';
+  return byteVal.toString(16).toUpperCase().padStart(2, '0');
+}
+
+export function formatSelectionSize(count) {
+  if (count <= 0) return 'Selected: 0 bytes';
+  if (count === 1) return 'Selected: 1 byte';
+  return `Selected: ${count} bytes`;
+}
+
+export function createModifiedCounter() {
+  let count = 0;
+
+  return {
+    getCount() { return count; },
+    increment() { count = Math.max(0, count + 1); },
+    decrement() { count = Math.max(0, count - 1); },
+    reset(value = 0) { count = Math.max(0, Math.floor(value || 0)); },
+    clear() { count = 0; },
+  };
+}

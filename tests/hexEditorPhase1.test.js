@@ -15,6 +15,10 @@ import {
   parseOffsetInput,
   clampGotoOffset,
   getRowForOffset,
+  formatOffsetLabel,
+  formatByteValue,
+  formatSelectionSize,
+  createModifiedCounter,
 } from '../src/lib/hexEditorCore.js';
 
 describe('Phase 1 Hex/ASCII Editor Core Tests', () => {
@@ -323,10 +327,183 @@ describe('Phase 2A — Go To Offset', () => {
     assert.equal(updated.length, 3);
   });
 
-  it('14. Search input keyboard behavior remains intact (form control guard)', () => {
+   it('14. Search input keyboard behavior remains intact (form control guard)', () => {
     // Simulating a search input element
     const mockInput = { tagName: 'INPUT', getAttribute: () => null };
     assert.ok(isEditableFormControl(mockInput));
     // This ensures the editor's keydown handler would return early for this target
+  });
+});
+
+describe('Phase 2B — Hex Editor Status Bar', () => {
+  it('1. formatOffsetLabel formats hex offsets with 8-digit padding', () => {
+    assert.equal(formatOffsetLabel(0), '0x00000000');
+    assert.equal(formatOffsetLabel(0x24), '0x00000024');
+    assert.equal(formatOffsetLabel(0x1a0), '0x000001A0');
+    assert.equal(formatOffsetLabel(0x03800000), '0x03800000');
+  });
+
+  it('2. formatOffsetLabel handles null/zero/undefined', () => {
+    assert.equal(formatOffsetLabel(0), '0x00000000');
+    assert.equal(formatOffsetLabel(null), '0x00000000');
+    assert.equal(formatOffsetLabel(undefined), '0x00000000');
+  });
+
+  it('3. formatByteValue formats byte values', () => {
+    assert.equal(formatByteValue(0x00), '00');
+    assert.equal(formatByteValue(0xff), 'FF');
+    assert.equal(formatByteValue(0x1a), '1A');
+    assert.equal(formatByteValue(0x7f), '7F');
+  });
+
+  it('4. formatByteValue handles invalid values', () => {
+    assert.equal(formatByteValue(null), '--');
+    assert.equal(formatByteValue(undefined), '--');
+    assert.equal(formatByteValue(256), '--');
+    assert.equal(formatByteValue(-1), '--');
+  });
+
+  it('5. formatSelectionSize formats selection counts', () => {
+    assert.equal(formatSelectionSize(0), 'Selected: 0 bytes');
+    assert.equal(formatSelectionSize(1), 'Selected: 1 byte');
+    assert.equal(formatSelectionSize(2), 'Selected: 2 bytes');
+    assert.equal(formatSelectionSize(100), 'Selected: 100 bytes');
+  });
+
+  it('6. createModifiedCounter tracks modified byte count', () => {
+    const counter = createModifiedCounter();
+    assert.equal(counter.getCount(), 0);
+    counter.increment();
+    counter.increment();
+    assert.equal(counter.getCount(), 2);
+    counter.decrement();
+    assert.equal(counter.getCount(), 1);
+    counter.clear();
+    assert.equal(counter.getCount(), 0);
+  });
+
+  it('7. createModifiedCounter never goes negative', () => {
+    const counter = createModifiedCounter();
+    counter.decrement();
+    assert.equal(counter.getCount(), 0);
+  });
+
+  it('8. createModifiedCounter reset sets explicit value', () => {
+    const counter = createModifiedCounter();
+    counter.increment();
+    counter.increment();
+    counter.increment();
+    assert.equal(counter.getCount(), 3);
+    counter.reset(1);
+    assert.equal(counter.getCount(), 1);
+  });
+
+  it('9. Modified count increments on edit', () => {
+    const counter = createModifiedCounter();
+    const bytes = new Uint8Array([0x10, 0x20, 0x30]);
+    const origBytes = new Uint8Array([0x10, 0x20, 0x30]);
+
+    // Simulate commitEdit for byte 1: 0x20 -> 0xAA
+    const before = bytes[1]; // 0x20
+    const newValue = 0xaa;
+    bytes[1] = newValue;
+    const wasModified = origBytes ? before !== origBytes[1] : false; // false
+    const isNowModified = origBytes ? newValue !== origBytes[1] : true; // true
+    if (wasModified && !isNowModified) counter.decrement();
+    else if (!wasModified && isNowModified) counter.increment();
+
+    assert.equal(counter.getCount(), 1);
+    assert.equal(bytes[1], 0xaa);
+  });
+
+  it('10. Modified count decrements on undo', () => {
+    const counter = createModifiedCounter();
+    const bytes = new Uint8Array([0x10, 0x20, 0x30]);
+    const origBytes = new Uint8Array([0x10, 0x20, 0x30]);
+
+    // Apply edit: 0x20 -> 0xAA, counter goes to 1
+    bytes[1] = 0xaa;
+    counter.increment();
+    assert.equal(counter.getCount(), 1);
+
+    // Undo: revert 0xAA back to 0x20
+    const afterModified = origBytes ? 0xaa !== origBytes[1] : true; // true (0xaa != 0x20)
+    const beforeModified = origBytes ? 0x20 !== origBytes[1] : false; // false (0x20 == 0x20)
+    if (afterModified && !beforeModified) counter.decrement();
+    else if (!afterModified && beforeModified) counter.increment();
+
+    assert.equal(counter.getCount(), 0);
+  });
+
+  it('11. Modified count increments on redo', () => {
+    const counter = createModifiedCounter();
+    const bytes = new Uint8Array([0x10, 0x20, 0x30]);
+    const origBytes = new Uint8Array([0x10, 0x20, 0x30]);
+
+    // Initial edit: counter = 1
+    counter.increment();
+
+    // Undo: counter back to 0
+    counter.decrement();
+
+    // Redo: re-apply 0x20 -> 0xAA
+    const beforeModified = origBytes ? 0x20 !== origBytes[1] : false; // false
+    const afterModified = origBytes ? 0xaa !== origBytes[1] : true; // true
+    if (beforeModified && !afterModified) counter.decrement();
+    else if (!beforeModified && afterModified) counter.increment();
+
+    assert.equal(counter.getCount(), 1);
+  });
+
+  it('12. Modified count clears on buffer reload (revert/new file)', () => {
+    const counter = createModifiedCounter();
+    counter.increment();
+    counter.increment();
+    assert.equal(counter.getCount(), 2);
+
+    // Simulate buffer reload (origBytesRef re-initialized)
+    counter.clear();
+    assert.equal(counter.getCount(), 0);
+  });
+
+  it('13. Modified count handles multiple edits to same byte', () => {
+    const counter = createModifiedCounter();
+    const origBytes = new Uint8Array([0x10, 0x20, 0x30]);
+    const bytes = new Uint8Array([0x10, 0x20, 0x30]);
+
+    // Edit byte 1: 0x20 -> 0xAA (was unmodified, now modified)
+    bytes[1] = 0xaa;
+    counter.increment();
+    assert.equal(counter.getCount(), 1);
+
+    // Edit byte 1 again: 0xAA -> 0xBB (was modified, still modified - no count change)
+    const before = bytes[1]; // 0xaa
+    const newVal = 0xbb;
+    const wasModified = before !== origBytes[1]; // true (0xaa != 0x20)
+    const isNowModified = newVal !== origBytes[1]; // true (0xbb != 0x20)
+    if (wasModified && !isNowModified) counter.decrement();
+    else if (!wasModified && isNowModified) counter.increment();
+
+    assert.equal(counter.getCount(), 1); // still 1, not 2
+
+    // Edit byte 1 back to original: 0xBB -> 0x20 (was modified, now unmodified)
+    const before2 = bytes[1]; // 0xbb
+    const newVal2 = 0x20;
+    const wasModified2 = before2 !== origBytes[1]; // true
+    const isNowModified2 = newVal2 !== origBytes[1]; // false
+    if (wasModified2 && !isNowModified2) counter.decrement();
+    else if (!wasModified2 && isNowModified2) counter.increment();
+
+    assert.equal(counter.getCount(), 0);
+  });
+
+  it('14. isEditableFormControl guards search input from editor keyboard handlers', () => {
+    // The search input in HexViewer is an HTMLInputElement
+    const mockSearchInput = { tagName: 'INPUT', getAttribute: () => null };
+    assert.ok(isEditableFormControl(mockSearchInput));
+
+    // The goto input is also an HTMLInputElement
+    const mockGotoInput = { tagName: 'INPUT', getAttribute: () => null };
+    assert.ok(isEditableFormControl(mockGotoInput));
   });
 });

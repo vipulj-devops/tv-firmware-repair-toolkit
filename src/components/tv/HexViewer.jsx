@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Copy, Check, Save, Search, ChevronUp, ChevronDown, X, Undo, Redo } from 'lucide-react';
 import { toHex } from '@/lib/crc32';
+import { formatBytes } from '@/lib/binaryUtils';
 import {
   clampIndex,
   getSelectionRange,
@@ -10,6 +11,10 @@ import {
   isEditableFormControl,
   parseOffsetInput,
   clampGotoOffset,
+  formatOffsetLabel,
+  formatByteValue,
+  formatSelectionSize,
+  createModifiedCounter,
 } from '@/lib/hexEditorCore';
 
 const ROW_BYTES = 16;
@@ -35,6 +40,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
   // Undo / Redo history & baseline snapshot
   const origBytesRef = useRef(null);
   const historyRef = useRef(createEditHistory());
+  const modifiedCounterRef = useRef(createModifiedCounter());
   const [historyTick, setHistoryTick] = useState(0);
 
   const [scrollTop, setScrollTop] = useState(0);
@@ -46,11 +52,13 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
   useEffect(() => {
     if (!bytes) {
       origBytesRef.current = null;
+      modifiedCounterRef.current.clear();
       return;
     }
     if (!origBytesRef.current || origBytesRef.current.length !== bytes.length) {
       origBytesRef.current = new Uint8Array(bytes);
       historyRef.current.clear();
+      modifiedCounterRef.current.clear();
       setHistoryTick((t) => t + 1);
     }
   }, [bytes]);
@@ -157,6 +165,11 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
     if (before === newValue) return;
     const pushed = historyRef.current.pushEdit({ index, before, after: newValue });
     if (pushed) {
+      const origBytes = origBytesRef.current;
+      const wasModified = origBytes ? before !== origBytes[index] : false;
+      const isNowModified = origBytes ? newValue !== origBytes[index] : true;
+      if (wasModified && !isNowModified) modifiedCounterRef.current.decrement();
+      else if (!wasModified && isNowModified) modifiedCounterRef.current.increment();
       onEditByte?.(index, newValue);
       setHistoryTick((t) => t + 1);
     }
@@ -165,6 +178,11 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
   const handleUndo = () => {
     const item = historyRef.current.undo();
     if (item) {
+      const origBytes = origBytesRef.current;
+      const afterModified = origBytes ? item.entry.after !== origBytes[item.index] : true;
+      const beforeModified = origBytes ? item.entry.before !== origBytes[item.index] : false;
+      if (afterModified && !beforeModified) modifiedCounterRef.current.decrement();
+      else if (!afterModified && beforeModified) modifiedCounterRef.current.increment();
       onEditByte?.(item.index, item.value);
       setCursorIndex(item.index);
       setAnchorIndex(item.index);
@@ -175,6 +193,11 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
   const handleRedo = () => {
     const item = historyRef.current.redo();
     if (item) {
+      const origBytes = origBytesRef.current;
+      const beforeModified = origBytes ? item.entry.before !== origBytes[item.index] : false;
+      const afterModified = origBytes ? item.entry.after !== origBytes[item.index] : true;
+      if (beforeModified && !afterModified) modifiedCounterRef.current.decrement();
+      else if (!beforeModified && afterModified) modifiedCounterRef.current.increment();
       onEditByte?.(item.index, item.value);
       setCursorIndex(item.index);
       setAnchorIndex(item.index);
@@ -534,15 +557,21 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, highl
       {/* Footer Info Bar */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 text-[10px] text-muted-foreground border-t border-border bg-card">
         <span>
-          {(bytes ? bytes.length : 0).toLocaleString()} bytes · {totalRows.toLocaleString()} rows
+          {formatBytes(bytes ? bytes.length : 0)} · {totalRows.toLocaleString()} rows
         </span>
-        <span>
-          Cursor: <strong className="font-mono text-foreground">0x{toHex(cursorIndex, 8)}</strong> ({cursorIndex})
-          {selectionCount > 1 && (
-            <span className="ml-2 text-emerald-600 font-medium">
-              Selection: 0x{toHex(selectionStart, 8)}–0x{toHex(selectionEnd, 8)} ({selectionCount} B)
-            </span>
-          )}
+        <span className="flex items-center gap-3 font-mono">
+          <span>
+            Offset: <strong className="text-foreground">{formatOffsetLabel(cursorIndex)}</strong> ({cursorIndex})
+          </span>
+          <span>
+            Byte: <strong className="text-foreground">{formatByteValue(bytes && cursorIndex < bytes.length ? bytes[cursorIndex] : null)}</strong>
+          </span>
+          <span className={selectionCount > 0 ? 'text-emerald-600' : 'text-muted-foreground'}>
+            {formatSelectionSize(selectionCount)}
+          </span>
+          <span className={modifiedCounterRef.current.getCount() > 0 ? 'text-amber-500' : 'text-muted-foreground'}>
+            Modified: {modifiedCounterRef.current.getCount()}
+          </span>
         </span>
         <span className="uppercase text-[9px] px-1.5 py-0.5 rounded border border-border bg-muted/40 font-semibold">
           Pane: {activePane}
