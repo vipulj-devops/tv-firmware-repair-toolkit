@@ -42,6 +42,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
   // Go To Offset
   const [gotoInput, setGotoInput] = useState('');
   const [gotoError, setGotoError] = useState(null);
+  const [gotoMode, setGotoMode] = useState('editor'); // 'editor' | 'physical'
 
   // Shared cursor & selection state
   const [cursorIndex, setCursorIndex] = useState(0);
@@ -315,6 +316,43 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
       setGotoError(parsed.error);
       return;
     }
+
+    if (gotoMode === 'physical') {
+      if (!resolvedOffsetMap) {
+        setGotoError('No physical mapping available');
+        return;
+      }
+      const phys = resolvedOffsetMap.toLogical(parsed.value);
+      let target;
+      if (phys.reason === 'mapped') {
+        target = phys.logicalOffset;
+      } else if (phys.reason === 'unmapped') {
+        setGotoError('Physical offset not mapped to this file');
+        return;
+      } else if (phys.reason === 'ambiguous') {
+        setGotoError('Ambiguous: maps to multiple editor locations');
+        return;
+      } else if (phys.reason === 'invalid') {
+        setGotoError('Invalid physical offset');
+        return;
+      } else {
+        setGotoError('Invalid physical offset');
+        return;
+      }
+
+      const clamped = clampGotoOffset(target, bytes.length);
+      if (!clamped.ok) {
+        setGotoError(clamped.error);
+        return;
+      }
+      setCursorIndex(clamped.value);
+      setAnchorIndex(clamped.value);
+      setHexNibble('');
+      scrollToIndex(clamped.value);
+      return;
+    }
+
+    // Editor (logical) mode
     const clamped = clampGotoOffset(parsed.value, bytes.length);
     if (!clamped.ok) {
       setGotoError(clamped.error);
@@ -324,7 +362,6 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
     setCursorIndex(target);
     setAnchorIndex(target);
     setHexNibble('');
-    setGotoInput('');
     // Scroll the target row into view via the existing auto-scroll effect
     if (scrollRef.current) {
       const row = Math.floor(target / ROW_BYTES);
@@ -335,8 +372,8 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
       } else if (targetTop + ROW_HEIGHT > container.scrollTop + container.clientHeight) {
         container.scrollTop = targetTop + ROW_HEIGHT - container.clientHeight;
       }
-     }
-   };
+   }
+  };
 
   const scrollToIndex = (idx) => {
     if (!scrollRef.current) return;
@@ -689,18 +726,31 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
             className={`w-28 rounded-md border bg-background px-2 py-1 text-xs font-mono outline-none ${gotoError ? 'border-rose-500 focus:ring-rose-500/40' : 'border-input focus:ring-emerald-500/40'} focus:ring-2`}
           />
         </div>
+        <div className="relative">
+          <select
+            value={gotoMode}
+            onChange={(e) => setGotoMode(e.target.value)}
+            className="appearance-none rounded-md border border-border bg-background px-2 py-1 text-xs font-medium outline-none hover:bg-accent pr-5"
+          >
+            <option value="editor">Editor</option>
+            <option value="physical">Physical</option>
+          </select>
+          <ChevronDown className="w-3 h-3 text-muted-foreground absolute right-1 top-1/2 -translate-y-1/2 pointer-events-none" />
+        </div>
         <button
           onClick={handleGotoOffset}
           className="flex items-center gap-1 text-xs rounded-md border border-border hover:bg-accent px-2.5 py-1 transition-colors"
         >
           Go
         </button>
-        {gotoError && (
+      </div>
+      {gotoError && (
+        <div className="px-3 py-1.5 border-b border-border bg-card">
           <span className="text-[10px] text-rose-500 max-w-48 truncate" title={gotoError}>
             {gotoError}
           </span>
-        )}
-      </div>
+        </div>
+      )}
       <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-border bg-card">
         <span className="text-[11px] text-muted-foreground shrink-0">Replace:</span>
         <input

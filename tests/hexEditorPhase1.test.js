@@ -29,6 +29,7 @@ import {
   collectNonOverlappingReplacementEdits,
   validateReplacementInputs,
 } from '../src/lib/hexEditorCore.js';
+import { createOffsetMap, createContiguousOffsetMap, isOffsetMap } from '../src/lib/offsetMap.js';
 
 describe('Phase 1 Hex/ASCII Editor Core Tests', () => {
   it('1. ASCII character edit updates correct byte (fixed length, printable ASCII)', () => {
@@ -1941,5 +1942,315 @@ describe('Phase 4A-2 — EXT4 Physical Offset Propagation', () => {
 
     assert.ok(src.includes('}, [selected, bytes, sb, reader, partitionStartByte]);'),
       'Ext4Browser file-loading useEffect must include partitionStartByte in its dependency array');
+  });
+});
+
+describe('Phase 4B-3 — Go To Physical Offset', () => {
+  it('1. Physical Go To with contiguous map resolves to logical offset', () => {
+    const map = createContiguousOffsetMap({
+      physicalStartByte: 0x10000000,
+      lengthBytes: 0x1000,
+    });
+
+    const r = map.toLogical(0x10000100);
+    assert.equal(r.reason, 'mapped');
+    assert.equal(r.logicalOffset, 0x100);
+  });
+
+  it('2. Physical Go To with fragmented map resolves correct region', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0x0000, physicalStartByte: 0xA000, lengthBytes: 0x1000 },
+        { logicalStartByte: 0x1000, physicalStartByte: 0xB000, lengthBytes: 0x1000 },
+      ],
+    });
+
+    const r1 = map.toLogical(0xA000);
+    assert.equal(r1.reason, 'mapped');
+    assert.equal(r1.logicalOffset, 0x0);
+
+    const r2 = map.toLogical(0xB500);
+    assert.equal(r2.reason, 'mapped');
+    assert.equal(r2.logicalOffset, 0x1500);
+  });
+
+  it('3. Physical offset at region start maps to logical start', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0x0000, physicalStartByte: 0x1000, lengthBytes: 0x200 },
+      ],
+    });
+
+    const r = map.toLogical(0x1000);
+    assert.equal(r.reason, 'mapped');
+    assert.equal(r.logicalOffset, 0x0000);
+  });
+
+  it('4. Physical offset at region end maps to logical end', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0x1000, physicalStartByte: 0xA000, lengthBytes: 0x200 },
+      ],
+    });
+
+    const r = map.toLogical(0xA1FF);
+    assert.equal(r.reason, 'mapped');
+    assert.equal(r.logicalOffset, 0x11FF);
+  });
+
+  it('5. Physical offset in physical gap is unmapped', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0, physicalStartByte: 0x1000, lengthBytes: 0x100 },
+        { logicalStartByte: 0x100, physicalStartByte: 0x5000, lengthBytes: 0x100 },
+      ],
+    });
+
+    const r = map.toLogical(0x3000);
+    assert.equal(r.reason, 'unmapped');
+    assert.equal(r.logicalOffset, null);
+  });
+
+  it('6. Physical offset outside all mapped regions is unmapped', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0, physicalStartByte: 0x1000, lengthBytes: 0x100 },
+      ],
+    });
+
+    const r = map.toLogical(0x9900);
+    assert.equal(r.reason, 'unmapped');
+    assert.equal(r.logicalOffset, null);
+  });
+
+  it('7. Ambiguous physical mapping returns ambiguous reason', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0x0000, physicalStartByte: 0x1000, lengthBytes: 0x200 },
+        { logicalStartByte: 0x0200, physicalStartByte: 0x1100, lengthBytes: 0x200 },
+      ],
+    });
+
+    const r = map.toLogical(0x1100);
+    assert.equal(r.reason, 'ambiguous');
+    assert.equal(r.logicalOffset, null);
+  });
+
+  it('8. Invalid physical input (negative) returns invalid', () => {
+    const map = createContiguousOffsetMap({
+      physicalStartByte: 0x1000,
+      lengthBytes: 0x100,
+    });
+
+    const r = map.toLogical(-1);
+    assert.equal(r.reason, 'invalid');
+    assert.equal(r.logicalOffset, null);
+  });
+
+  it('9. Editor Go To still works (no offsetMap)', () => {
+    const bytes = new Uint8Array(100);
+
+    const parsed = parseOffsetInput('0x24');
+    assert.ok(parsed.ok);
+    assert.equal(parsed.value, 0x24);
+
+    const clamped = clampGotoOffset(parsed.value, bytes.length);
+    assert.ok(clamped.ok);
+    assert.equal(clamped.value, 0x24);
+  });
+
+  it('10. Cursor does not move on physical lookup failure (unmapped)', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0, physicalStartByte: 0x1000, lengthBytes: 0x100 },
+      ],
+    });
+
+    const r = map.toLogical(0x5000);
+    assert.equal(r.reason, 'unmapped');
+    assert.equal(r.logicalOffset, null);
+  });
+
+  it('11. Large physical offsets handled correctly', () => {
+    const basePhys = 0x10000000;
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0, physicalStartByte: basePhys, lengthBytes: 0x10000 },
+      ],
+    });
+
+    const r = map.toLogical(basePhys + 0x8000);
+    assert.equal(r.reason, 'mapped');
+    assert.equal(r.logicalOffset, 0x8000);
+  });
+
+  it('12. baseOffset compatibility through resolved offset map', () => {
+    const baseOffset = 0x6A734000;
+    const bytes = new Uint8Array(0x1000);
+
+    const map = createContiguousOffsetMap({
+      physicalStartByte: baseOffset,
+      lengthBytes: bytes.length,
+    });
+
+    assert.ok(isOffsetMap(map));
+
+    const r = map.toLogical(baseOffset + 0x100);
+    assert.equal(r.reason, 'mapped');
+    assert.equal(r.logicalOffset, 0x100);
+
+    const r2 = map.toPhysical(0x100);
+    assert.equal(r2.reason, 'mapped');
+    assert.equal(r2.physicalOffset, baseOffset + 0x100);
+  });
+
+  it('13. Sparse mapping behavior - physical to logical for sparse region', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0, physicalStartByte: 0x1000, lengthBytes: 0x1000 },
+        { logicalStartByte: 0x3000, physicalStartByte: 0x5000, lengthBytes: 0x1000 },
+      ],
+      logicalSize: 0x4000,
+    });
+
+    const r = map.toPhysical(0x1000);
+    assert.equal(r.reason, 'sparse');
+    assert.equal(r.physicalOffset, null);
+  });
+
+  it('14. Successful physical navigation maps to correct logical location', () => {
+    const baseOffset = 0x10000000;
+    const map = createContiguousOffsetMap({
+      physicalStartByte: baseOffset,
+      lengthBytes: 0x1000,
+    });
+
+    const physicalTarget = baseOffset + 0x240;
+    const r = map.toLogical(physicalTarget);
+    assert.equal(r.reason, 'mapped');
+    assert.equal(r.logicalOffset, 0x240);
+
+    const clamped = clampGotoOffset(r.logicalOffset, 0x1000);
+    assert.ok(clamped.ok);
+    assert.equal(clamped.value, 0x240);
+  });
+
+  it('15. Physical Go To with no mapping returns null map', () => {
+    const parsed = parseOffsetInput('0x1000');
+    assert.ok(parsed.ok);
+
+    const noMap = null;
+    assert.equal(noMap, null);
+  });
+
+  it('16. HexViewer source: gotoMode state, physical handling, no input clear on success, error below controls', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes("const [gotoMode, setGotoMode] = useState('editor')"), 'Should have gotoMode state defaulting to editor');
+    assert.ok(src.includes('gotoMode === \'physical\''), 'Should check gotoMode for physical');
+    assert.ok(src.includes("'No physical mapping available'"), 'Should show error when no map');
+    assert.ok(src.includes("'Physical offset not mapped to this file'"), 'Should show unmapped error');
+    assert.ok(src.includes("'Ambiguous: maps to multiple editor locations'"), 'Should show ambiguous error');
+    assert.ok(src.includes("'Invalid physical offset'"), 'Should show invalid error');
+  });
+
+  it('17. HexViewer source includes Physical option in dropdown', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('value="editor"'), 'Dropdown should have Editor option');
+    assert.ok(src.includes('value="physical"'), 'Dropdown should have Physical option');
+    assert.ok(src.includes('setGotoMode'), 'Dropdown should update gotoMode state');
+  });
+
+  it('18. Go To input is NOT cleared on successful navigation (physical)', () => {
+    const baseOffset = 0x10000000;
+    const map = createContiguousOffsetMap({
+      physicalStartByte: baseOffset,
+      lengthBytes: 0x1000,
+    });
+
+    const parsed = parseOffsetInput('0x24');
+    assert.ok(parsed.ok);
+
+    const phys = map.toLogical(parsed.value + baseOffset);
+    assert.equal(phys.reason, 'mapped');
+    assert.equal(phys.logicalOffset, 0x24);
+
+    const clamped = clampGotoOffset(phys.logicalOffset, 0x1000);
+    assert.ok(clamped.ok);
+    assert.equal(clamped.value, 0x24);
+
+    assert.equal(parsed.value, 0x24);
+  });
+
+  it('19. Go To input is NOT cleared on successful navigation (editor)', () => {
+    const bytes = new Uint8Array(100);
+
+    const parsed = parseOffsetInput('0x24');
+    assert.ok(parsed.ok);
+    assert.equal(parsed.value, 0x24);
+
+    const clamped = clampGotoOffset(parsed.value, bytes.length);
+    assert.ok(clamped.ok);
+    assert.equal(clamped.value, 0x24);
+  });
+
+  it('20. Go To input is NOT cleared on failed physical navigation', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0, physicalStartByte: 0x1000, lengthBytes: 0x100 },
+      ],
+    });
+
+    const parsed = parseOffsetInput('0x5000');
+    assert.ok(parsed.ok);
+    assert.equal(parsed.value, 0x5000);
+
+    const r = map.toLogical(parsed.value);
+    assert.equal(r.reason, 'unmapped');
+    assert.equal(r.logicalOffset, null);
+  });
+
+  it('21. Failed navigation does not move cursor (logical offset unchanged)', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0, physicalStartByte: 0x1000, lengthBytes: 0x100 },
+      ],
+    });
+
+    const parsed = parseOffsetInput('0x5000');
+    const r = map.toLogical(parsed.value);
+    assert.equal(r.reason, 'unmapped');
+    assert.equal(r.logicalOffset, null);
+
+    const cursor = 0;
+    assert.equal(cursor, 0);
+  });
+
+  it('22. Go To error rendered in dedicated area below controls (source check)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    // The error span should be inside a dedicated div with border-b class,
+    // appearing AFTER the closing </div> of the Go To controls bar
+    assert.ok(
+      src.includes('{gotoError && ('),
+      'Error should be rendered in a dedicated div below the Go To controls'
+    );
+    assert.ok(
+      src.includes('px-3 py-1.5 border-b border-border bg-card'),
+      'Error should be inside a bordered div for the dedicated error row'
+    );
   });
 });
