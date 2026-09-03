@@ -1626,7 +1626,7 @@ describe('Phase 4A-1 — baseOffset Prop & Absolute Dump Offset Display', () => 
     assert.equal(formatOffsetLabel(raw), '0x00000000');
   });
 
-  it('8. HexViewer accepts baseOffset prop (source contract)', async () => {
+  it('8. HexViewer accepts baseOffset and offsetMap props (source contract)', async () => {
     const { readFileSync } = await import('node:fs');
     const { join, dirname } = await import('node:path');
     const { fileURLToPath } = await import('node:url');
@@ -1634,11 +1634,12 @@ describe('Phase 4A-1 — baseOffset Prop & Absolute Dump Offset Display', () => 
     const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
 
     assert.ok(src.includes('baseOffset = null'), 'HexViewer should accept baseOffset with default null');
+    assert.ok(src.includes('offsetMap = null'), 'HexViewer should accept offsetMap with default null');
     assert.ok(src.includes('Editor offset:'), 'HexViewer should display "Editor offset:" label');
-    assert.ok(src.includes('Base offset:'), 'HexViewer should display "Base offset:" label');
-    assert.ok(src.includes('Absolute dump:'), 'HexViewer should display "Absolute dump:" label');
-    assert.ok(src.includes('formatOffsetLabel(baseOffset)'), 'Should format baseOffset with formatOffsetLabel');
-    assert.ok(src.includes('formatOffsetLabel(baseOffset + cursorIndex)'), 'Should compute absolute as baseOffset + cursorIndex');
+    assert.ok(src.includes('Physical:'), 'HexViewer should display "Physical:" label when offsetMap/baseOffset is set');
+    assert.ok(src.includes('formatOffsetLabel'), 'Should use formatOffsetLabel for formatting');
+    assert.ok(src.includes('resolvedOffsetMap'), 'Should compute a resolved offset map');
+    assert.ok(src.includes('createContiguousOffsetMap'), 'Should convert baseOffset to contiguous map');
   });
 
   it('9. HexViewer hides absolute offset display when baseOffset is null', async () => {
@@ -1662,23 +1663,25 @@ describe('Phase 4A-1 — baseOffset Prop & Absolute Dump Offset Display', () => 
     assert.ok(src.includes('baseOffset={0}'), 'TVConfigTool should pass baseOffset={0}');
   });
 
-  it('11. Ext4Browser passes baseOffset={fileBaseOffset} to HexViewer (contiguous only)', async () => {
+  it('11. Ext4Browser builds offsetMap and passes it to HexViewer', async () => {
     const { readFileSync } = await import('node:fs');
     const { join, dirname } = await import('node:path');
     const { fileURLToPath } = await import('node:url');
     const dir = dirname(fileURLToPath(import.meta.url));
     const src = readFileSync(join(dir, '../src/components/tv/Ext4Browser.jsx'), 'utf8');
 
-    // Ext4Browser should pass baseOffset to HexViewer
-    assert.ok(src.includes('baseOffset={fileBaseOffset}'), 'Ext4Browser should pass baseOffset to HexViewer');
+    // Ext4Browser should build an offsetMap from extents and pass it to HexViewer
+    assert.ok(src.includes('buildExt4FileOffsetMap'), 'Ext4Browser should import buildExt4FileOffsetMap');
+    assert.ok(src.includes('offsetMap={fileOffsetMap}'), 'Ext4Browser should pass offsetMap to HexViewer');
 
-    // But fileBaseOffset should be null for non-contiguous or unselected files
-    assert.ok(src.includes('const [fileBaseOffset, setFileBaseOffset] = useState(null)'),
-      'fileBaseOffset state should default to null');
+    // The offset map state should default to null
+    assert.ok(src.includes('const [fileOffsetMap, setFileOffsetMap] = useState(null)'),
+      'fileOffsetMap state should default to null');
 
-    // The computation should check for single contiguous extent
-    assert.ok(src.includes('extents.length === 1 && extents[0].logical === 0'),
-      'Should only compute baseOffset for single-extent files with logical=0');
+    // The buildExt4FileOffsetMap call should use blockSize, partitionStartByte, and fileSize
+    assert.ok(src.includes('blockSize: sb.blockSize'), 'Should pass blockSize to buildExt4FileOffsetMap');
+    assert.ok(src.includes('partitionStartByte'), 'Should pass partitionStartByte to buildExt4FileOffsetMap');
+    assert.ok(src.includes('fileSize'), 'Should pass fileSize to buildExt4FileOffsetMap');
   });
 
   it('12. Absolute offset calculation does not modify original bytes', () => {

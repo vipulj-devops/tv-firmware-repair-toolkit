@@ -27,6 +27,7 @@ import { isExt4, parseSuperblock, listFiles, readFileBytes, readFileBytesWithInf
 import { parseSuperblockRange, listFilesRange, readFileBytesRange, readFileBytesRangeWithInfo, getFreeSpaceRange, getAllocatedSpaceRange } from '@/lib/ext4Range';
 import { patchExistingFileIo, createFileIo, growAndPatchFileIo, deleteFileIo } from '@/lib/ext4PatchIo';
 import { INPLACE_TOO_LARGE_MESSAGE, EXT4_BEST_EFFORT_NOTE } from '@/lib/exploreSession';
+import { buildExt4FileOffsetMap } from '@/lib/ext4OffsetMap';
 import { createZip } from '@/lib/zipWriter';
 import { formatBytes } from '@/lib/binaryUtils';
 import HexViewer from '@/components/tv/HexViewer';
@@ -180,7 +181,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
   const [imgError, setImgError] = useState(false);
   const [imgValid, setImgValid] = useState(true);
   const [rawBytes, setRawBytes] = useState(null);
-  const [fileBaseOffset, setFileBaseOffset] = useState(null);
+  const [fileOffsetMap, setFileOffsetMap] = useState(null);
   const [isBinary, setIsBinary] = useState(false);
   const [extracting, setExtracting] = useState(false);
   const [extractProgress, setExtractProgress] = useState(null);
@@ -209,16 +210,17 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
         const result = await loadFileBytesWithInfo(selected.inode);
         const raw = result.bytes;
         if (cancelled) return;
-        // Compute physical base offset for HexViewer.
-        // Only safe when the file is stored contiguously with logical block 0.
+        // Build a generic offset map from EXT4 extents for HexViewer.
+        // This supports contiguous, fragmented, and sparse files.
         const extents = result.extents || [];
-        let computedBaseOffset = null;
-        if (extents.length === 1 && extents[0].logical === 0) {
-          const firstExtent = extents[0];
-          const startByte = result.startByte ?? partitionStartByte ?? 0;
-          computedBaseOffset = startByte + firstExtent.physical * sb.blockSize;
-        }
-        setFileBaseOffset(computedBaseOffset);
+        const startByte = result.startByte ?? partitionStartByte ?? 0;
+        const { map: builtMap } = buildExt4FileOffsetMap({
+          extents,
+          blockSize: sb.blockSize,
+          partitionStartByte: startByte,
+          fileSize: selected.size,
+        });
+        setFileOffsetMap(builtMap);
         if (isImage(selected.path)) {
           const detected = detectImageType(raw);
           if (detected) {
@@ -249,7 +251,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
         setContent('');
         setOrigContent('');
         setImgUrl(null);
-        setFileBaseOffset(null);
+        setFileOffsetMap(null);
       }
     };
     run();
@@ -693,11 +695,11 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
         ) : isBinary ? (
           <div className="rounded-md border border-input bg-background min-h-[360px] overflow-hidden">
              <HexViewer
-               bytes={rawBytes}
-               onEditByte={inPlaceWritable ? editByteInFile : () => {}}
-               onEditBytes={inPlaceWritable ? editBytesInFile : () => {}}
-               baseOffset={fileBaseOffset}
-             />
+                bytes={rawBytes}
+                onEditByte={inPlaceWritable ? editByteInFile : () => {}}
+                onEditBytes={inPlaceWritable ? editBytesInFile : () => {}}
+                offsetMap={fileOffsetMap}
+              />
           </div>
         ) : (
           <textarea value={content} onChange={(e) => setContent(e.target.value)} spellCheck={false}

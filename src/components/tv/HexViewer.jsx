@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Copy, Check, Save, Search, ChevronUp, ChevronDown, X, Undo, Redo } from 'lucide-react';
 import { toHex } from '@/lib/crc32';
 import { formatBytes } from '@/lib/binaryUtils';
+import { createContiguousOffsetMap, isOffsetMap } from '@/lib/offsetMap';
 import {
   clampIndex,
   getSelectionRange,
@@ -27,7 +28,7 @@ import {
 const ROW_BYTES = 16;
 const ROW_HEIGHT = 22; // px
 
-export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEditBytes, highlight, onSave, baseOffset = null }) {
+export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEditBytes, highlight, onSave, baseOffset = null, offsetMap = null }) {
   const [copied, setCopied] = useState(null);
   const [query, setQuery] = useState('');
   const [replaceInput, setReplaceInput] = useState('');
@@ -58,6 +59,19 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
   const scrollRef = useRef(null);
   const containerRef = useRef(null);
   const [viewportH, setViewportH] = useState(420);
+
+  // Unified offset map: use offsetMap if provided, otherwise convert baseOffset
+  // into a single-region contiguous map for backward compatibility.
+  const resolvedOffsetMap = useMemo(() => {
+    if (offsetMap && isOffsetMap(offsetMap)) return offsetMap;
+    if (baseOffset != null && Number.isSafeInteger(baseOffset) && baseOffset >= 0 && bytes && bytes.length > 0) {
+      return createContiguousOffsetMap({
+        physicalStartByte: baseOffset,
+        lengthBytes: bytes.length,
+      });
+    }
+    return null;
+  }, [offsetMap, baseOffset, bytes]);
 
   // Initialize/reset baseline original bytes when bytes buffer changes
   useEffect(() => {
@@ -766,11 +780,13 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
 
                       const valHex = isCursor && hexNibble ? (hexNibble + '_') : toHex(bytes[idx], 2);
 
-                      return (
-                        <span
-                          key={idx}
-                          onClick={(e) => handleCellClick(idx, 'hex', e)}
-                          title={`Offset: 0x${toHex(idx, 8)} (${idx})\nHex: 0x${toHex(bytes[idx], 2)}\nASCII: ${bytes[idx] >= 32 && bytes[idx] <= 126 ? String.fromCharCode(bytes[idx]) : '.'}${isModified ? '\n[MODIFIED]' : ''}`}
+                       const phyResult = resolvedOffsetMap ? resolvedOffsetMap.toPhysical(idx) : null;
+                       const phyLabel = phyResult && phyResult.reason === 'mapped' ? formatOffsetLabel(phyResult.physicalOffset) : (phyResult && phyResult.reason === 'sparse' ? 'unmapped' : '—');
+                       return (
+                         <span
+                           key={idx}
+                           onClick={(e) => handleCellClick(idx, 'hex', e)}
+                           title={`Offset: 0x${toHex(idx, 8)} (${idx})\nPhysical: ${phyLabel}\nHex: 0x${toHex(bytes[idx], 2)}\nASCII: ${bytes[idx] >= 32 && bytes[idx] <= 126 ? String.fromCharCode(bytes[idx]) : '.'}${isModified ? '\n[MODIFIED]' : ''}`}
                            className={`inline-block w-[1.7em] text-center cursor-pointer rounded px-0.5 mx-[1px] transition-colors ${
                              isSelected
                                ? 'bg-emerald-600 text-white font-medium'
@@ -812,11 +828,13 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
                       const inMatch = !isCurrentMatchIdx && isInAnyMatch(idx);
                       const ch = bytes[idx] >= 32 && bytes[idx] <= 126 ? String.fromCharCode(bytes[idx]) : '.';
 
-                      return (
-                        <span
-                          key={idx}
-                          onClick={(e) => handleCellClick(idx, 'ascii', e)}
-                          title={`Offset: 0x${toHex(idx, 8)} (${idx})\nASCII: '${ch}' (0x${toHex(bytes[idx], 2)})${isModified ? '\n[MODIFIED]' : ''}`}
+                       const phyResultA = resolvedOffsetMap ? resolvedOffsetMap.toPhysical(idx) : null;
+                       const phyLabelA = phyResultA && phyResultA.reason === 'mapped' ? formatOffsetLabel(phyResultA.physicalOffset) : (phyResultA && phyResultA.reason === 'sparse' ? 'unmapped' : '—');
+                       return (
+                         <span
+                           key={idx}
+                           onClick={(e) => handleCellClick(idx, 'ascii', e)}
+                           title={`Offset: 0x${toHex(idx, 8)} (${idx})\nPhysical: ${phyLabelA}\nASCII: '${ch}' (0x${toHex(bytes[idx], 2)})${isModified ? '\n[MODIFIED]' : ''}`}
                           className={`inline-block w-[1.1em] text-center cursor-pointer rounded transition-colors ${
                             isSelected
                               ? 'bg-emerald-600 text-white font-medium'
@@ -857,24 +875,36 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
         {formatBytes(bytes ? bytes.length : 0)} · {totalRows.toLocaleString()} rows
       </span>
       <span className="flex items-center gap-3 font-mono">
-        {baseOffset != null ? (
-          <>
-            <span>
-              Editor offset: <strong className="text-foreground">{formatOffsetLabel(cursorIndex)}</strong>
-            </span>
-            <span>
-              Base offset: <strong className="text-foreground">{formatOffsetLabel(baseOffset)}</strong>
-            </span>
-            <span>
-              Absolute dump: <strong className="text-foreground">{formatOffsetLabel(baseOffset + cursorIndex)}</strong>
-            </span>
-            <span className={selectionCount > 0 ? 'text-emerald-600' : 'text-muted-foreground'}>
-              {formatSelectionSize(selectionCount)}
-            </span>
-            <span className={modifiedCounterRef.current.getCount() > 0 ? 'text-amber-500' : 'text-muted-foreground'}>
-              Modified: {modifiedCounterRef.current.getCount()}
-            </span>
-          </>
+        {resolvedOffsetMap ? (
+          (() => {
+            const phyResult = resolvedOffsetMap.toPhysical(cursorIndex);
+            let physicalDisplay;
+            if (phyResult.reason === 'mapped') {
+              physicalDisplay = formatOffsetLabel(phyResult.physicalOffset);
+            } else if (phyResult.reason === 'sparse') {
+              physicalDisplay = 'unmapped (sparse)';
+            } else if (phyResult.reason === 'out-of-range') {
+              physicalDisplay = '—';
+            } else {
+              physicalDisplay = '—';
+            }
+            return (
+              <>
+                <span>
+                  Editor offset: <strong className="text-foreground">{formatOffsetLabel(cursorIndex)}</strong>
+                </span>
+                <span>
+                  Physical: <strong className="text-foreground">{physicalDisplay}</strong>
+                </span>
+                <span className={selectionCount > 0 ? 'text-emerald-600' : 'text-muted-foreground'}>
+                  {formatSelectionSize(selectionCount)}
+                </span>
+                <span className={modifiedCounterRef.current.getCount() > 0 ? 'text-amber-500' : 'text-muted-foreground'}>
+                  Modified: {modifiedCounterRef.current.getCount()}
+                </span>
+              </>
+            );
+          })()
         ) : (
           <>
             <span>
