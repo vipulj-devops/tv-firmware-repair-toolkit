@@ -2681,4 +2681,16 @@ describe('Phase 4B-4 — HexViewer Context Menu', () => {
       'Between </div> and </ContextMenuTrigger> there must be no newline/whitespace that would create a text node child'
     );
   });
+
+  it('20. ContextMenuContent uses menuKey to force remount and reposition on repeated right-clicks', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('const [menuKey, setMenuKey] = useState(0)'), 'Should declare menuKey state counter');
+    assert.ok(src.includes('setMenuKey((k) => k + 1)'), 'Should increment menuKey on container contextmenu event');
+    assert.ok(src.includes('<ContextMenuContent key={menuKey}'), 'ContextMenuContent should use key={menuKey}');
+  });
 });

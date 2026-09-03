@@ -65,6 +65,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
   const [historyTick, setHistoryTick] = useState(0);
 
   const [scrollTop, setScrollTop] = useState(0);
+  const [menuKey, setMenuKey] = useState(0);
   const scrollRef = useRef(null);
   const containerRef = useRef(null);
   const [viewportH, setViewportH] = useState(420);
@@ -856,6 +857,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
         <ContextMenuTrigger asChild>
           <div
             ref={scrollRef}
+            onContextMenu={() => setMenuKey((k) => k + 1)}
             onScroll={(e) => setScrollTop(e.target.scrollTop)}
             className="overflow-y-auto"
             style={{ height: 420 }}
@@ -983,7 +985,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
           </div> {/* position: absolute */}
            </div> {/* totalHeight wrapper */}
         </div></ContextMenuTrigger>
-        <ContextMenuContent className="w-56">
+        <ContextMenuContent key={menuKey} className="w-56">
           <ContextMenuItem
             onSelect={handleUndo}
             disabled={!historyRef.current.canUndo()}
