@@ -30,6 +30,7 @@ import {
   validateReplacementInputs,
 } from '../src/lib/hexEditorCore.js';
 import { createOffsetMap, createContiguousOffsetMap, isOffsetMap } from '../src/lib/offsetMap.js';
+import { toHex } from '../src/lib/crc32.js';
 
 describe('Phase 1 Hex/ASCII Editor Core Tests', () => {
   it('1. ASCII character edit updates correct byte (fixed length, printable ASCII)', () => {
@@ -2251,6 +2252,433 @@ describe('Phase 4B-3 — Go To Physical Offset', () => {
     assert.ok(
       src.includes('px-3 py-1.5 border-b border-border bg-card'),
       'Error should be inside a bordered div for the dedicated error row'
+    );
+  });
+});
+
+describe('Phase 4B-4 — Offset Copy', () => {
+  it('1. formatOffsetLabel formats editor offset for clipboard (small)', () => {
+    assert.equal(formatOffsetLabel(0x1A0), '0x000001A0');
+    assert.equal(formatOffsetLabel(0), '0x00000000');
+    assert.equal(formatOffsetLabel(0x24), '0x00000024');
+  });
+
+  it('2. formatOffsetLabel handles large offsets (>4GB) without truncation', () => {
+    const offset = 0x1_0000_01A0;
+    const formatted = formatOffsetLabel(offset);
+    assert.match(formatted, /^0x[0-9A-F]+$/);
+    assert.equal(formatted, '0x1000001A0');
+    assert.equal(parseInt(formatted.slice(2), 16), offset);
+  });
+
+  it('3. Copy Editor Offset uses toPhysical result for physical copy', () => {
+    const baseOffset = 0x6A734000;
+    const map = createContiguousOffsetMap({
+      physicalStartByte: baseOffset,
+      lengthBytes: 0x1000,
+    });
+
+    const physResult = map.toPhysical(0x100);
+    assert.equal(physResult.reason, 'mapped');
+    assert.equal(physResult.physicalOffset, baseOffset + 0x100);
+
+    const editorOffset = formatOffsetLabel(0x100);
+    const physicalOffset = formatOffsetLabel(physResult.physicalOffset);
+    assert.equal(editorOffset, '0x00000100');
+    assert.equal(physicalOffset, '0x6A734100');
+  });
+
+  it('4. Copy Physical Offset with contiguous map', () => {
+    const baseOffset = 0x10000000;
+    const map = createContiguousOffsetMap({
+      physicalStartByte: baseOffset,
+      lengthBytes: 0x1000,
+    });
+
+    const cursorIndex = 0x240;
+    const physResult = map.toPhysical(cursorIndex);
+    assert.equal(physResult.reason, 'mapped');
+    assert.equal(physResult.physicalOffset, baseOffset + 0x240);
+
+    const clipped = formatOffsetLabel(physResult.physicalOffset);
+    assert.equal(clipped, '0x10000240');
+  });
+
+  it('5. Copy Physical Offset with fragmented map', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0x0000, physicalStartByte: 0xA000, lengthBytes: 0x1000 },
+        { logicalStartByte: 0x1000, physicalStartByte: 0xB000, lengthBytes: 0x1000 },
+      ],
+    });
+
+    const r1 = map.toPhysical(0x500);
+    assert.equal(r1.reason, 'mapped');
+    assert.equal(r1.physicalOffset, 0xA500);
+
+    const r2 = map.toPhysical(0x1500);
+    assert.equal(r2.reason, 'mapped');
+    assert.equal(r2.physicalOffset, 0xB500);
+
+    assert.equal(formatOffsetLabel(r1.physicalOffset), '0x0000A500');
+    assert.equal(formatOffsetLabel(r2.physicalOffset), '0x0000B500');
+  });
+
+  it('6. Physical copy unavailable with sparse mapping', () => {
+    const map = createContiguousOffsetMap({
+      physicalStartByte: 0x10000000,
+      lengthBytes: 0x1000,
+    });
+
+    const r = map.toPhysical(0x2000);
+    assert.equal(r.reason, 'out-of-range');
+    assert.equal(r.physicalOffset, null);
+  });
+
+  it('7. Physical copy unavailable with no offset map', () => {
+    const noMap = null;
+    assert.equal(noMap, null);
+    assert.equal(isOffsetMap(noMap), false);
+  });
+
+  it('8. Physical offset at sparse logical location is not mapped', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0, physicalStartByte: 0x1000, lengthBytes: 0x100 },
+        { logicalStartByte: 0x200, physicalStartByte: 0x5000, lengthBytes: 0x100 },
+      ],
+    });
+
+    const r = map.toPhysical(0x150);
+    assert.equal(r.reason, 'sparse');
+    assert.equal(r.physicalOffset, null);
+  });
+
+  it('9. Physical copy unavailable at cursor position when no physical mapping', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0, physicalStartByte: 0x1000, lengthBytes: 0x100 },
+      ],
+    });
+
+    const cursorPhysical = map.toPhysical(0x200);
+    assert.notEqual(cursorPhysical.reason, 'mapped');
+  });
+
+  it('10. Editor offset copy always available when bytes exist', () => {
+    const bytes = new Uint8Array(100);
+    const cursorIndex = 50;
+
+    const editorOffset = formatOffsetLabel(cursorIndex);
+    assert.equal(editorOffset, '0x00000032');
+  });
+
+  it('11. Copy Hex and Copy ASCII helpers still work (regression)', () => {
+    const bytes = new Uint8Array([0x4e, 0x4f, 0x4e, 0x45]);
+    const { start, end } = getSelectionRange(0, 3);
+    const slice = bytes.subarray(start, end + 1);
+    const hexStr = Array.from(slice, (b) => toHex(b, 2)).join(' ');
+    assert.equal(hexStr, '4E 4F 4E 45');
+
+    const asciiStr = Array.from(slice, (b) => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.')).join('');
+    assert.equal(asciiStr, 'NONE');
+  });
+
+  it('12. Physical offset >4 GB copies correctly', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0, physicalStartByte: 0x1_0000_0000, lengthBytes: 0x1000 },
+      ],
+    });
+
+    const r = map.toPhysical(0x100);
+    assert.equal(r.reason, 'mapped');
+    assert.equal(r.physicalOffset, 0x1_0000_0100);
+
+    const formatted = formatOffsetLabel(r.physicalOffset);
+    assert.equal(formatted, '0x100000100');
+    assert.equal(parseInt(formatted.slice(2), 16), 0x1_0000_0100);
+  });
+});
+
+describe('Phase 4B-4 — HexViewer Context Menu', () => {
+  it('1. HexViewer source includes ContextMenu import and state', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('ContextMenu'), 'Should import ContextMenu');
+    assert.ok(src.includes('ContextMenuTrigger'), 'Should import ContextMenuTrigger');
+    assert.ok(src.includes('ContextMenuContent'), 'Should import ContextMenuContent');
+    assert.ok(src.includes('ContextMenuItem'), 'Should import ContextMenuItem');
+    assert.ok(src.includes('ContextMenuSeparator'), 'Should import ContextMenuSeparator');
+    assert.ok(src.includes('ContextMenuShortcut'), 'Should import ContextMenuShortcut');
+  });
+
+  it('2. Context menu has Undo action with disabled state', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('handleUndo'), 'Should reference handleUndo');
+    assert.ok(src.includes('historyRef.current.canUndo()'), 'Should check canUndo for disabled state');
+  });
+
+  it('3. Context menu has Redo action with disabled state', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('handleRedo'), 'Should reference handleRedo');
+    assert.ok(src.includes('historyRef.current.canRedo()'), 'Should check canRedo for disabled state');
+  });
+
+  it('4. Context menu has Copy Hex with selection check', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('copyHex'), 'Should reference copyHex');
+    assert.ok(src.includes('selectionCount === 0'), 'Should disable Copy Hex with no selection');
+  });
+
+  it('5. Context menu has Copy ASCII with selection check', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('copyAscii'), 'Should reference copyAscii');
+  });
+
+  it('6. Context menu has Copy Editor Offset action', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('copyEditorOffset'), 'Should have copyEditorOffset handler');
+    assert.ok(src.includes('Copy Editor Offset'), 'Should have Copy Editor Offset menu item');
+  });
+
+  it('7. Context menu has Copy Physical Offset with mapping check', () => {
+    const baseOffset = 0x10000000;
+    const map = createContiguousOffsetMap({
+      physicalStartByte: baseOffset,
+      lengthBytes: 0x1000,
+    });
+
+    const cursorIndex = 0x100;
+    const cursorPhysicalResult = map.toPhysical(cursorIndex);
+    assert.equal(cursorPhysicalResult.reason, 'mapped');
+    assert.equal(cursorPhysicalResult.physicalOffset, baseOffset + 0x100);
+
+    const formatted = formatOffsetLabel(cursorPhysicalResult.physicalOffset);
+    assert.equal(formatted, '0x10000100');
+  });
+
+  it('8. Copy Physical Offset disabled when no offset map', () => {
+    const resolvedOffsetMap = null;
+    const isAvailable = !!resolvedOffsetMap && resolvedOffsetMap.toPhysical(0).reason === 'mapped';
+    assert.equal(isAvailable, false);
+  });
+
+  it('9. Copy Physical Offset disabled for sparse logical location', () => {
+    const map = createOffsetMap({
+      regions: [
+        { logicalStartByte: 0, physicalStartByte: 0x1000, lengthBytes: 0x100 },
+      ],
+    });
+
+    const cursorPhysicalResult = map.toPhysical(0x200);
+    assert.notEqual(cursorPhysicalResult.reason, 'mapped');
+    assert.equal(cursorPhysicalResult.physicalOffset, null);
+  });
+
+  it('10. Context menu has Select All action', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('selectAll'), 'Should have selectAll handler');
+    assert.ok(src.includes('Select All'), 'Should have Select All menu item');
+  });
+
+  it('11. Select All sets anchor=0 and cursor=bytes.length-1', () => {
+    const bytes = new Uint8Array(100);
+
+    const anchorIndex = 0;
+    const cursorIndex = bytes.length - 1;
+
+    assert.equal(anchorIndex, 0);
+    assert.equal(cursorIndex, 99);
+
+    const { start, end } = getSelectionRange(anchorIndex, cursorIndex);
+    assert.equal(start, 0);
+    assert.equal(end, 99);
+  });
+
+  it('12. Context menu wraps virtualized grid (ContextMenuTrigger)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('<ContextMenuTrigger'), 'Should have ContextMenuTrigger wrapping grid');
+    assert.ok(src.includes('asChild'), 'Trigger should use asChild for native element wrapping');
+  });
+
+  it('13. Context menu not modal (allows interaction with toolbar)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('modal={false}'), 'Context menu should be non-modal');
+  });
+
+  it('14. Byte cells have onContextMenu handlers for cursor positioning', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('onContextMenu'), 'Byte cells should have onContextMenu handler');
+    assert.ok(src.includes('handleCellContextMenu'), 'Should have handleCellContextMenu handler');
+  });
+
+  it('15. handleCellContextMenu preserves selection when right-clicking selected byte', () => {
+    const bytes = new Uint8Array(100);
+    const anchorIndex = 0;
+    const cursorIndex = 20;
+
+    const idx = 10;
+    const inSelection = isIndexSelected(idx, anchorIndex, cursorIndex);
+    assert.ok(inSelection, 'Byte 10 should be in selection [0..20]');
+
+    if (!inSelection) {
+      const clamped = clampIndex(idx, bytes.length);
+      assert.equal(clamped, idx);
+    }
+  });
+
+  it('16. handleCellContextMenu moves cursor when right-clicking unselected byte', () => {
+    const bytes = new Uint8Array(100);
+    let anchorIndex = 0;
+    let cursorIndex = 0;
+
+    const idx = 50;
+    const inSelection = isIndexSelected(idx, anchorIndex, cursorIndex);
+    assert.ok(!inSelection, 'Byte 50 should not be in selection [0..0]');
+
+    if (!inSelection) {
+      const clamped = clampIndex(idx, bytes.length);
+      cursorIndex = clamped;
+      anchorIndex = clamped;
+    }
+
+    assert.equal(cursorIndex, 50);
+    assert.equal(anchorIndex, 50);
+  });
+
+  it('17. No Paste/Cut actions in context menu (out of scope)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(!src.includes('handlePaste'), 'Paste should not be implemented');
+    assert.ok(!src.includes('>Paste<'), 'Paste menu item should not exist');
+    assert.ok(!src.includes('>Cut<'), 'Cut menu item should not exist');
+  });
+
+  it('18. Context menu uses Radix positioning (no manual positioning)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('<ContextMenuContent'), 'Should use Radix ContextMenuContent for positioning');
+    assert.ok(!src.includes('contextMenuPos'), 'Should not have manual position state');
+  });
+
+  it('19. ContextMenuTrigger with asChild has exactly one child element (no whitespace text-node)', async () => {
+    // Regression test for the white-screen bug.
+    // When ContextMenuTrigger uses asChild, Radix Slot requires exactly one child.
+    // A newline/whitespace between the closing </div> and </ContextMenuTrigger> creates
+    // a whitespace text node sibling, causing React.Children.only to throw.
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    // Find the ContextMenuTrigger opening tag
+    const triggerOpenIdx = src.indexOf('<ContextMenuTrigger asChild>');
+    assert.ok(triggerOpenIdx !== -1, 'Should have ContextMenuTrigger with asChild');
+
+    // Find the matching closing tag after the opening
+    const afterOpen = src.slice(triggerOpenIdx + '<ContextMenuTrigger asChild>'.length);
+    const triggerCloseIdx = afterOpen.indexOf('</ContextMenuTrigger>');
+
+    assert.ok(triggerCloseIdx !== -1, 'Should have a closing </ContextMenuTrigger> tag');
+
+    // The content between <ContextMenuTrigger asChild> and </ContextMenuTrigger>
+    // should be exactly ONE JSX element (the scroll container div).
+    // It must NOT have a bare </div> followed by whitespace before </ContextMenuTrigger>.
+    const betweenContent = afterOpen.slice(0, triggerCloseIdx);
+
+    // The closing div and </ContextMenuTrigger> must be on the same logical boundary.
+    // Specifically, there must NOT be a pattern like: </div>...whitespace...</ContextMenuTrigger>
+    // Verify the last div close is immediately adjacent (no whitespace between them).
+    const lastDivCloseIdx = betweenContent.lastIndexOf('</div>');
+    assert.ok(lastDivCloseIdx !== -1, 'Should have a closing </div> for the trigger child');
+
+    const betweenDivAndTrigger = betweenContent.slice(lastDivCloseIdx + '</div>'.length);
+
+    // After the last </div>, there should be no meaningful whitespace before </ContextMenuTrigger>
+    // The only allowed content is the comment and then immediately </ContextMenuTrigger>
+    // We check that no standalone whitespace-only gap exists that would become a text node.
+    // The correct structure: </div> {/* comment */}</ContextMenuTrigger>
+    // The buggy structure: </div> {/* comment */}\n      </ContextMenuTrigger>
+    //   (newline + spaces between </div> and </ContextMenuTrigger>)
+
+    // Extract what's between the </div> and the end of content (before </ContextMenuTrigger>)
+    const tail = betweenContent.slice(lastDivCloseIdx);
+    // The tail should end with </ContextMenuTrigger> already excluded, so check the raw source.
+    // In the source, after the child div closes, the closing </ContextMenuTrigger> should
+    // immediately follow (allowing only an inline comment, no newline+indentation).
+    const sourceAfterTriggerOpen = src.slice(triggerOpenIdx);
+    const closeTagInSource = sourceAfterTriggerOpen.indexOf('</ContextMenuTrigger>');
+    const segment = sourceAfterTriggerOpen.slice(0, closeTagInSource);
+
+    // Find the last </div> in the segment (the trigger's child div)
+    const lastDivInSegment = segment.lastIndexOf('</div>');
+    assert.ok(lastDivInSegment !== -1, 'Segment should contain a closing div');
+
+    const betweenDivAndCloseTag = segment.slice(lastDivInSegment + '</div>'.length);
+    // This should only contain an inline comment like {/* scrollRef container */}
+    // and/or nothing, NO newline+indentation whitespace
+    const hasWhitespaceGap = /\n\s+/.test(betweenDivAndCloseTag);
+    assert.ok(!hasWhitespaceGap,
+      'Between </div> and </ContextMenuTrigger> there must be no newline/whitespace that would create a text node child'
     );
   });
 });

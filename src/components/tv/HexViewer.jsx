@@ -4,6 +4,14 @@ import { toHex } from '@/lib/crc32';
 import { formatBytes } from '@/lib/binaryUtils';
 import { createContiguousOffsetMap, isOffsetMap } from '@/lib/offsetMap';
 import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuShortcut,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import {
   clampIndex,
   getSelectionRange,
   isIndexSelected,
@@ -61,18 +69,23 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
   const containerRef = useRef(null);
   const [viewportH, setViewportH] = useState(420);
 
-  // Unified offset map: use offsetMap if provided, otherwise convert baseOffset
-  // into a single-region contiguous map for backward compatibility.
-  const resolvedOffsetMap = useMemo(() => {
-    if (offsetMap && isOffsetMap(offsetMap)) return offsetMap;
-    if (baseOffset != null && Number.isSafeInteger(baseOffset) && baseOffset >= 0 && bytes && bytes.length > 0) {
-      return createContiguousOffsetMap({
-        physicalStartByte: baseOffset,
-        lengthBytes: bytes.length,
-      });
-    }
-    return null;
-  }, [offsetMap, baseOffset, bytes]);
+      // Unified offset map: use offsetMap if provided, otherwise convert baseOffset
+      // into a single-region contiguous map for backward compatibility.
+      const resolvedOffsetMap = useMemo(() => {
+        if (offsetMap && isOffsetMap(offsetMap)) return offsetMap;
+        if (baseOffset != null && Number.isSafeInteger(baseOffset) && baseOffset >= 0 && bytes && bytes.length > 0) {
+          return createContiguousOffsetMap({
+            physicalStartByte: baseOffset,
+            lengthBytes: bytes.length,
+          });
+        }
+        return null;
+      }, [offsetMap, baseOffset, bytes]);
+
+  const cursorPhysicalResult = useMemo(() => {
+    if (!resolvedOffsetMap) return { reason: 'unmapped', physicalOffset: null };
+    return resolvedOffsetMap.toPhysical(cursorIndex);
+  }, [resolvedOffsetMap, cursorIndex]);
 
   // Initialize/reset baseline original bytes when bytes buffer changes
   useEffect(() => {
@@ -117,6 +130,34 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
     const slice = bytes.subarray(start, end + 1);
     const asciiStr = Array.from(slice, (b) => (b >= 32 && b <= 126 ? String.fromCharCode(b) : '.')).join('');
     copyToClipboard(asciiStr, 'ascii');
+  };
+
+  const copyEditorOffset = () => {
+    if (!bytes || bytes.length === 0) return;
+    copyToClipboard(formatOffsetLabel(cursorIndex), 'editor offset');
+  };
+
+  const copyPhysicalOffset = () => {
+    if (!bytes || bytes.length === 0 || !resolvedOffsetMap) return;
+    if (cursorPhysicalResult.reason !== 'mapped') return;
+    copyToClipboard(formatOffsetLabel(cursorPhysicalResult.physicalOffset), 'physical offset');
+  };
+
+  const selectAll = () => {
+    if (!bytes || bytes.length === 0) return;
+    setAnchorIndex(0);
+    setCursorIndex(bytes.length - 1);
+  };
+
+  const handleCellContextMenu = (idx, e) => {
+    if (!bytes || bytes.length === 0) return;
+    const clamped = clampIndex(idx, bytes.length);
+    const inSelection = isIndexSelected(clamped, anchorIndex, cursorIndex);
+    if (!inSelection) {
+      setCursorIndex(clamped);
+      setAnchorIndex(clamped);
+    }
+    setHexNibble('');
   };
 
   const totalRows = Math.max(1, Math.ceil((bytes ? bytes.length : 0) / ROW_BYTES));
@@ -710,11 +751,6 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
             <X className="w-3 h-3" />
           </button>
         )}
-        {searchError && (
-          <span className="text-[10px] text-rose-500 max-w-xs truncate" title={searchError}>
-            {searchError}
-          </span>
-        )}
         <div className="h-4 w-px bg-border mx-1" />
         <span className="text-[11px] text-muted-foreground shrink-0">Go To:</span>
         <div className="relative">
@@ -751,6 +787,13 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
           </span>
         </div>
       )}
+      {searchError && (
+        <div className="px-3 py-1.5 border-b border-border bg-card">
+          <span className="text-[10px] text-rose-500 max-w-full break-words" title={searchError}>
+            {searchError}
+          </span>
+        </div>
+      )}
       <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-border bg-card">
         <span className="text-[11px] text-muted-foreground shrink-0">Replace:</span>
         <input
@@ -776,17 +819,23 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
         >
           Replace All
         </button>
-        {replaceValidation?.ok === false && replaceValidation.error && (
-          <span className="text-[10px] text-rose-500 max-w-xs truncate" title={replaceValidation.error}>
+      </div>
+      {replaceValidation?.ok === false && replaceValidation.error && (
+        <div className="px-3 py-1.5 border-b border-border bg-card">
+          <span className="text-[10px] text-rose-500 max-w-full break-words" title={replaceValidation.error}>
             {replaceValidation.error}
           </span>
-        )}
-        {!hasCurrentMatch && replaceValidation?.ok && query && (
+        </div>
+      )}
+      {!hasCurrentMatch && replaceValidation?.ok && query && (
+        <div className="px-3 py-1.5 border-b border-border bg-card">
           <span className="text-[10px] text-muted-foreground">
             Find a match to enable Replace
           </span>
-        )}
-      </div>
+        </div>
+      )}
+
+
 
       {/* Table Headers */}
       <div className="grid grid-cols-[80px_1fr_140px] gap-3 px-3 py-2 text-muted-foreground border-b border-border bg-muted/30 font-semibold text-[11px]">
@@ -795,15 +844,24 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
         <span>ASCII</span>
       </div>
 
-      {/* Virtualized Rows */}
-      <div
-        ref={scrollRef}
-        onScroll={(e) => setScrollTop(e.target.scrollTop)}
-        className="overflow-y-auto"
-        style={{ height: 420 }}
+       {/* Virtualized Rows */}
+      <ContextMenu
+        modal={false}
+        onOpenChange={(open) => {
+          if (open) {
+            containerRef.current?.focus();
+          }
+        }}
       >
-        <div style={{ height: totalHeight, position: 'relative' }}>
-          <div style={{ position: 'absolute', top: startRow * ROW_HEIGHT, left: 0, right: 0 }}>
+        <ContextMenuTrigger asChild>
+          <div
+            ref={scrollRef}
+            onScroll={(e) => setScrollTop(e.target.scrollTop)}
+            className="overflow-y-auto"
+            style={{ height: 420 }}
+          >
+            <div style={{ height: totalHeight, position: 'relative' }}>
+            <div style={{ position: 'absolute', top: startRow * ROW_HEIGHT, left: 0, right: 0 }}>
             {visibleRows.map((r) => {
               const base = r * ROW_BYTES;
               const isRowHi = highlight != null && base <= highlight && highlight < base + ROW_BYTES;
@@ -814,7 +872,12 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
                   style={{ height: ROW_HEIGHT }}
                 >
                   {/* Offset Column */}
-                  <span className="text-muted-foreground font-mono select-none">{toHex(base, 8)}</span>
+                  <span
+                    onContextMenu={(e) => handleCellContextMenu(base, e)}
+                    className="text-muted-foreground font-mono select-none cursor-pointer"
+                  >
+                    {toHex(base, 8)}
+                  </span>
 
                   {/* Hex Bytes Column */}
                   <span className="tracking-wider break-all font-mono select-none">
@@ -832,12 +895,13 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
 
                        const phyResult = resolvedOffsetMap ? resolvedOffsetMap.toPhysical(idx) : null;
                        const phyLabel = phyResult && phyResult.reason === 'mapped' ? formatOffsetLabel(phyResult.physicalOffset) : (phyResult && phyResult.reason === 'sparse' ? 'unmapped' : '—');
-                       return (
-                         <span
-                           key={idx}
-                           onClick={(e) => handleCellClick(idx, 'hex', e)}
-                           title={`Offset: 0x${toHex(idx, 8)} (${idx})\nPhysical: ${phyLabel}\nHex: 0x${toHex(bytes[idx], 2)}\nASCII: ${bytes[idx] >= 32 && bytes[idx] <= 126 ? String.fromCharCode(bytes[idx]) : '.'}${isModified ? '\n[MODIFIED]' : ''}`}
-                           className={`inline-block w-[1.7em] text-center cursor-pointer rounded px-0.5 mx-[1px] transition-colors ${
+                        return (
+                          <span
+                            key={idx}
+                            onClick={(e) => handleCellClick(idx, 'hex', e)}
+                            onContextMenu={(e) => handleCellContextMenu(idx, e)}
+                            title={`Offset: 0x${toHex(idx, 8)} (${idx})\nPhysical: ${phyLabel}\nHex: 0x${toHex(bytes[idx], 2)}\nASCII: ${bytes[idx] >= 32 && bytes[idx] <= 126 ? String.fromCharCode(bytes[idx]) : '.'}${isModified ? '\n[MODIFIED]' : ''}`}
+                            className={`inline-block w-[1.7em] text-center cursor-pointer rounded px-0.5 mx-[1px] transition-colors ${
                              isSelected
                                ? 'bg-emerald-600 text-white font-medium'
                                : isCurrentMatchIdx
@@ -880,11 +944,12 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
 
                        const phyResultA = resolvedOffsetMap ? resolvedOffsetMap.toPhysical(idx) : null;
                        const phyLabelA = phyResultA && phyResultA.reason === 'mapped' ? formatOffsetLabel(phyResultA.physicalOffset) : (phyResultA && phyResultA.reason === 'sparse' ? 'unmapped' : '—');
-                       return (
-                         <span
-                           key={idx}
-                           onClick={(e) => handleCellClick(idx, 'ascii', e)}
-                           title={`Offset: 0x${toHex(idx, 8)} (${idx})\nPhysical: ${phyLabelA}\nASCII: '${ch}' (0x${toHex(bytes[idx], 2)})${isModified ? '\n[MODIFIED]' : ''}`}
+                        return (
+                          <span
+                            key={idx}
+                            onClick={(e) => handleCellClick(idx, 'ascii', e)}
+                            onContextMenu={(e) => handleCellContextMenu(idx, e)}
+                            title={`Offset: 0x${toHex(idx, 8)} (${idx})\nPhysical: ${phyLabelA}\nASCII: '${ch}' (0x${toHex(bytes[idx], 2)})${isModified ? '\n[MODIFIED]' : ''}`}
                           className={`inline-block w-[1.1em] text-center cursor-pointer rounded transition-colors ${
                             isSelected
                               ? 'bg-emerald-600 text-white font-medium'
@@ -915,9 +980,71 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
                 </div>
               );
             })}
-          </div>
-        </div>
-      </div>
+          </div> {/* position: absolute */}
+           </div> {/* totalHeight wrapper */}
+        </div></ContextMenuTrigger>
+        <ContextMenuContent className="w-56">
+          <ContextMenuItem
+            onSelect={handleUndo}
+            disabled={!historyRef.current.canUndo()}
+          >
+            <Undo className="w-3 h-3 mr-2" /> Undo
+            <ContextMenuShortcut>Ctrl+Z</ContextMenuShortcut>
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={handleRedo}
+            disabled={!historyRef.current.canRedo()}
+          >
+            <Redo className="w-3 h-3 mr-2" /> Redo
+            <ContextMenuShortcut>Ctrl+Y</ContextMenuShortcut>
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            onSelect={copyHex}
+            disabled={selectionCount === 0}
+          >
+            <Copy className="w-3 h-3 mr-2" /> Copy Hex
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={copyAscii}
+            disabled={selectionCount === 0}
+          >
+            <Copy className="w-3 h-3 mr-2" /> Copy ASCII
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={copyEditorOffset}
+            disabled={!bytes || bytes.length === 0}
+          >
+            <Copy className="w-3 h-3 mr-2" /> Copy Editor Offset
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={copyPhysicalOffset}
+            disabled={
+              !resolvedOffsetMap ||
+              cursorPhysicalResult.reason !== 'mapped'
+            }
+            title={
+              !resolvedOffsetMap
+                ? 'No physical offset map available'
+                : cursorPhysicalResult.reason === 'sparse'
+                ? 'No physical mapping at this location'
+                : cursorPhysicalResult.reason === 'out-of-range'
+                ? 'Offset out of range'
+                : 'No physical mapping available'
+            }
+          >
+            <Copy className="w-3 h-3 mr-2" /> Copy Physical Offset
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            onSelect={selectAll}
+            disabled={!bytes || bytes.length === 0}
+          >
+            Select All
+            <ContextMenuShortcut>Ctrl+A</ContextMenuShortcut>
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
 
       {/* Footer Info Bar */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 text-[10px] text-muted-foreground border-t border-border bg-card">
@@ -927,13 +1054,12 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
       <span className="flex items-center gap-3 font-mono">
         {resolvedOffsetMap ? (
           (() => {
-            const phyResult = resolvedOffsetMap.toPhysical(cursorIndex);
             let physicalDisplay;
-            if (phyResult.reason === 'mapped') {
-              physicalDisplay = formatOffsetLabel(phyResult.physicalOffset);
-            } else if (phyResult.reason === 'sparse') {
+            if (cursorPhysicalResult.reason === 'mapped') {
+              physicalDisplay = formatOffsetLabel(cursorPhysicalResult.physicalOffset);
+            } else if (cursorPhysicalResult.reason === 'sparse') {
               physicalDisplay = 'unmapped (sparse)';
-            } else if (phyResult.reason === 'out-of-range') {
+            } else if (cursorPhysicalResult.reason === 'out-of-range') {
               physicalDisplay = '—';
             } else {
               physicalDisplay = '—';
