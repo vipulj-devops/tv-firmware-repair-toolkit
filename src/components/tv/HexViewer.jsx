@@ -18,6 +18,7 @@ import {
   navigateKey,
   createEditHistory,
   isEditableFormControl,
+  isDragMovement,
   parseOffsetInput,
   clampGotoOffset,
   formatOffsetLabel,
@@ -57,6 +58,12 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
   const [anchorIndex, setAnchorIndex] = useState(0);
   const [activePane, setActivePane] = useState('hex'); // 'hex' | 'ascii'
   const [hexNibble, setHexNibble] = useState('');
+
+  // Mouse drag selection state
+  const [isDragging, setIsDragging] = useState(false);
+  const isDraggingRef = useRef(false);
+  const dragStart = useRef({ x: 0, y: 0, index: 0 });
+  const DRAG_THRESHOLD = 3;
 
   // Undo / Redo history & baseline snapshot
   const origBytesRef = useRef(null);
@@ -565,6 +572,44 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
     }
   };
 
+   // Mouse drag selection handlers
+  const handleCellMouseDown = (idx, e) => {
+    if (e.button !== 0) return;
+    if (!bytes || bytes.length === 0) return;
+    const clamped = clampIndex(idx, bytes.length);
+    dragStart.current = { x: e.clientX, y: e.clientY, index: clamped };
+    isDraggingRef.current = true;
+    setIsDragging(true);
+  };
+
+  const handleMouseMove = (e) => {
+    if (!isDraggingRef.current) return;
+    if (!isDragMovement(dragStart.current.x, dragStart.current.y, e.clientX, e.clientY, DRAG_THRESHOLD)) return;
+    const target = e.target;
+    const cellIdx = target.getAttribute('data-byte-index');
+    const idx = cellIdx ? parseInt(cellIdx, 10) : dragStart.current.index;
+    const clamped = clampIndex(idx, bytes.length);
+    setCursorIndex(clamped);
+  };
+
+  const handleMouseUp = () => {
+    if (isDraggingRef.current) {
+      setAnchorIndex(dragStart.current.index);
+      isDraggingRef.current = false;
+      setIsDragging(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isDragging) return;
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging]);
+
   // Keyboard Navigation and Input
   const handleKeyDown = (e) => {
     if (!bytes || bytes.length === 0) return;
@@ -898,12 +943,14 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
                        const phyResult = resolvedOffsetMap ? resolvedOffsetMap.toPhysical(idx) : null;
                        const phyLabel = phyResult && phyResult.reason === 'mapped' ? formatOffsetLabel(phyResult.physicalOffset) : (phyResult && phyResult.reason === 'sparse' ? 'unmapped' : '—');
                         return (
-                          <span
-                            key={idx}
-                            onClick={(e) => handleCellClick(idx, 'hex', e)}
-                            onContextMenu={(e) => handleCellContextMenu(idx, e)}
-                            title={`Offset: 0x${toHex(idx, 8)} (${idx})\nPhysical: ${phyLabel}\nHex: 0x${toHex(bytes[idx], 2)}\nASCII: ${bytes[idx] >= 32 && bytes[idx] <= 126 ? String.fromCharCode(bytes[idx]) : '.'}${isModified ? '\n[MODIFIED]' : ''}`}
-                            className={`inline-block w-[1.7em] text-center cursor-pointer rounded px-0.5 mx-[1px] transition-colors ${
+                           <span
+                             key={idx}
+                             data-byte-index={idx}
+                             onMouseDown={(e) => handleCellMouseDown(idx, e)}
+                             onClick={(e) => handleCellClick(idx, 'hex', e)}
+                             onContextMenu={(e) => handleCellContextMenu(idx, e)}
+                             title={`Offset: 0x${toHex(idx, 8)} (${idx})\nPhysical: ${phyLabel}\nHex: 0x${toHex(bytes[idx], 2)}\nASCII: ${bytes[idx] >= 32 && bytes[idx] <= 126 ? String.fromCharCode(bytes[idx]) : '.'}${isModified ? '\n[MODIFIED]' : ''}`}
+                             className={`inline-block w-[1.7em] text-center cursor-text rounded px-0.5 mx-[1px] transition-colors ${
                              isSelected
                                ? 'bg-emerald-600 text-white font-medium'
                                : isCurrentMatchIdx
@@ -947,12 +994,14 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
                        const phyResultA = resolvedOffsetMap ? resolvedOffsetMap.toPhysical(idx) : null;
                        const phyLabelA = phyResultA && phyResultA.reason === 'mapped' ? formatOffsetLabel(phyResultA.physicalOffset) : (phyResultA && phyResultA.reason === 'sparse' ? 'unmapped' : '—');
                         return (
-                          <span
-                            key={idx}
-                            onClick={(e) => handleCellClick(idx, 'ascii', e)}
-                            onContextMenu={(e) => handleCellContextMenu(idx, e)}
-                            title={`Offset: 0x${toHex(idx, 8)} (${idx})\nPhysical: ${phyLabelA}\nASCII: '${ch}' (0x${toHex(bytes[idx], 2)})${isModified ? '\n[MODIFIED]' : ''}`}
-                          className={`inline-block w-[1.1em] text-center cursor-pointer rounded transition-colors ${
+                           <span
+                             key={idx}
+                             data-byte-index={idx}
+                             onMouseDown={(e) => handleCellMouseDown(idx, e)}
+                             onClick={(e) => handleCellClick(idx, 'ascii', e)}
+                             onContextMenu={(e) => handleCellContextMenu(idx, e)}
+                             title={`Offset: 0x${toHex(idx, 8)} (${idx})\nPhysical: ${phyLabelA}\nASCII: '${ch}' (0x${toHex(bytes[idx], 2)})${isModified ? '\n[MODIFIED]' : ''}`}
+                           className={`inline-block w-[1.1em] text-center cursor-text rounded transition-colors ${
                             isSelected
                               ? 'bg-emerald-600 text-white font-medium'
                               : isCurrentMatchIdx

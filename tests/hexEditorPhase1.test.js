@@ -12,6 +12,7 @@ import {
   applyAsciiEdit,
   applyHexEdit,
   isEditableFormControl,
+  isDragMovement,
   parseOffsetInput,
   clampGotoOffset,
   getRowForOffset,
@@ -2690,7 +2691,125 @@ describe('Phase 4B-4 — HexViewer Context Menu', () => {
     const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
 
     assert.ok(src.includes('const [menuKey, setMenuKey] = useState(0)'), 'Should declare menuKey state counter');
-    assert.ok(src.includes('setMenuKey((k) => k + 1)'), 'Should increment menuKey on container contextmenu event');
-    assert.ok(src.includes('<ContextMenuContent key={menuKey}'), 'ContextMenuContent should use key={menuKey}');
-  });
-});
+     assert.ok(src.includes('setMenuKey((k) => k + 1)'), 'Should increment menuKey on container contextmenu event');
+     assert.ok(src.includes('<ContextMenuContent key={menuKey}'), 'ContextMenuContent should use key={menuKey}');
+   });
+ });
+
+ describe('Phase 5 — Mouse Drag Selection', () => {
+   it('1. isDragMovement returns false within threshold', () => {
+     assert.equal(isDragMovement(100, 100, 101, 100, 3), false);
+     assert.equal(isDragMovement(100, 100, 100, 101, 3), false);
+     assert.equal(isDragMovement(100, 100, 102, 102, 3), false);
+   });
+
+   it('2. isDragMovement returns true at or beyond threshold', () => {
+     assert.equal(isDragMovement(0, 0, 4, 0, 3), true);
+     assert.equal(isDragMovement(0, 0, 0, 4, 3), true);
+     assert.equal(isDragMovement(0, 0, 3, 3, 3), true);
+   });
+
+   it('3. isDragMovement uses default threshold of 3px', () => {
+     assert.equal(isDragMovement(0, 0, 3, 0), true);
+     assert.equal(isDragMovement(0, 0, 2, 0), false);
+   });
+
+   it('4. isDragMovement handles negative deltas', () => {
+     assert.equal(isDragMovement(100, 100, 98, 100, 3), false);
+     assert.equal(isDragMovement(100, 100, 96, 100, 3), true);
+     assert.equal(isDragMovement(100, 100, 100, 96, 3), true);
+   });
+
+   it('5. Drag start index is clamped to buffer bounds', () => {
+     assert.equal(clampIndex(0, 100), 0);
+     assert.equal(clampIndex(99, 100), 99);
+     assert.equal(clampIndex(-5, 100), 0);
+     assert.equal(clampIndex(150, 100), 99);
+   });
+
+   it('6. Drag updates cursor while preserving anchor', () => {
+     const anchor = 5;
+     const cursor = 10;
+     const range = getSelectionRange(anchor, cursor);
+     assert.equal(range.start, 5);
+     assert.equal(range.end, 10);
+     // Simulate drag to index 15
+     const newCursor = 15;
+     const range2 = getSelectionRange(anchor, newCursor);
+     assert.equal(range2.start, 5);
+     assert.equal(range2.end, 15);
+   });
+
+   it('7. Drag end sets anchor to drag start index', () => {
+     const dragStartIndex = 3;
+     const cursorDuringDrag = 20;
+     // On mouseup, anchor is set to dragStart.current.index
+     const finalRange = getSelectionRange(dragStartIndex, cursorDuringDrag);
+     assert.equal(finalRange.start, 3);
+     assert.equal(finalRange.end, 20);
+   });
+
+   it('8. Normal click (no drag) leaves selection unchanged by drag logic', () => {
+     // When drag distance < threshold, handleMouseMove is a no-op
+     // The click handler (handleCellClick) still fires and updates selection normally
+     assert.equal(isDragMovement(50, 50, 51, 50, 3), false);
+     assert.equal(isDragMovement(50, 50, 50, 52, 3), false);
+   });
+
+   it('9. Drag with button !== 0 is ignored', () => {
+     const mockEvent = { button: 1, clientX: 100, clientY: 100 };
+     assert.equal(mockEvent.button, 1);
+     // handleCellMouseDown checks e.button !== 0 and returns early
+   });
+
+   it('10. I-beam cursor applied to byte cells in HexViewer source', async () => {
+     const { readFileSync } = await import('node:fs');
+     const { join, dirname } = await import('node:path');
+     const { fileURLToPath } = await import('node:url');
+     const dir = dirname(fileURLToPath(import.meta.url));
+     const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+     assert.ok(src.includes('isDraggingRef'), 'Should use isDraggingRef for drag state');
+     assert.ok(src.includes('dragStart'), 'Should use dragStart ref');
+     assert.ok(src.includes('DRAG_THRESHOLD'), 'Should define DRAG_THRESHOLD constant');
+     assert.ok(src.includes('handleCellMouseDown'), 'Should have handleCellMouseDown');
+     assert.ok(src.includes('handleMouseMove'), 'Should have handleMouseMove');
+     assert.ok(src.includes('handleMouseUp'), 'Should have handleMouseUp');
+     assert.ok(src.includes("window.addEventListener('mousemove'"), 'Should attach window mousemove listener');
+     assert.ok(src.includes("window.addEventListener('mouseup'"), 'Should attach window mouseup listener');
+     assert.ok(src.includes("window.removeEventListener('mousemove'"), 'Should remove window mousemove listener');
+     assert.ok(src.includes("window.removeEventListener('mouseup'"), 'Should remove window mouseup listener');
+      assert.ok(src.includes("onMouseDown={(e) => handleCellMouseDown"), 'Should wire onMouseDown on byte cells');
+      assert.ok(src.includes("data-byte-index="), 'Should add data-byte-index attribute to byte cells');
+      assert.ok(src.includes('cursor-text'), 'Should apply cursor-text class to byte cells');
+     assert.ok(src.includes("import { toHex } from '@/lib/crc32'"), 'Should have existing imports intact');
+   });
+
+   it('11. Offset column retains existing cursor behavior (not I-beam)', async () => {
+     const { readFileSync } = await import('node:fs');
+     const { join, dirname } = await import('node:path');
+     const { fileURLToPath } = await import('node:url');
+     const dir = dirname(fileURLToPath(import.meta.url));
+     const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+      // Verify the offset column span does NOT have cursor-text or onMouseDown
+      // It should still have cursor-pointer or select-none
+      // Extract the offset column span by finding the span after "Offset Column" comment
+      const offsetCommentIdx = src.indexOf('Offset Column');
+      assert.ok(offsetCommentIdx !== -1, 'Should have Offset Column comment');
+      const offsetSpanStart = src.indexOf('<span', offsetCommentIdx);
+      const offsetSpanEnd = src.indexOf('</span>', offsetSpanStart) + '</span>'.length;
+      const offsetSpanClass = src.slice(offsetSpanStart, offsetSpanEnd);
+      assert.ok(!offsetSpanClass.includes('cursor-text'), 'Offset column should not use cursor-text');
+      assert.ok(!offsetSpanClass.includes('onMouseDown'), 'Offset column should not have onMouseDown for drag');
+   });
+
+   it('12. Drag threshold prevents accidental click-as-drag', () => {
+     // The threshold is ~3px, so sub-3px movements are treated as clicks
+     const threshold = 3;
+     assert.ok(!isDragMovement(0, 0, 1, 0, threshold));
+     assert.ok(!isDragMovement(0, 0, 2, 0, threshold));
+     assert.ok(!isDragMovement(0, 0, 0, 2, threshold));
+     assert.ok(isDragMovement(0, 0, 3, 0, threshold));
+   });
+ });

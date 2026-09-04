@@ -22,6 +22,12 @@ export function isIndexSelected(index, anchorIndex, cursorIndex) {
   return index >= start && index <= end;
 }
 
+export function isDragMovement(startX, startY, currentX, currentY, threshold = 3) {
+  const dx = currentX - startX;
+  const dy = currentY - startY;
+  return Math.hypot(dx, dy) >= threshold;
+}
+
 export function moveCursor({ cursorIndex, anchorIndex, newIndex, length, extendSelection = false }) {
   const clamped = clampIndex(newIndex, length);
   return {
