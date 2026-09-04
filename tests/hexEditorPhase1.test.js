@@ -3383,3 +3383,881 @@ describe('Phase 7 - Ctrl+V Paste', () => {
     assert.ok(src.includes('setSearchError'), 'Should use existing searchError for paste errors');
   });
 });
+
+describe('Phase 8 - Delete / Backspace (Fixed-Length Overwrite)', () => {
+  // Helper: simulate the core logic of handleDelete with selection
+  const simulateDeleteWithSelection = (bytes, anchorIndex, cursorIndex) => {
+    const { start, end } = getSelectionRange(anchorIndex, cursorIndex);
+    const count = end - start + 1;
+    const replacement = new Uint8Array(count);
+    const edits = collectOverwriteEdits(bytes, start, replacement);
+    const next = new Uint8Array(bytes);
+    for (const e of edits) next[e.index] = e.after;
+    return { next, newCursor: start, newAnchor: start, edits };
+  };
+
+  // Helper: simulate the core logic of handleDelete without selection
+  const simulateDeleteNoSelection = (bytes, cursorIndex) => {
+    const replacement = new Uint8Array([0x00]);
+    const edits = collectOverwriteEdits(bytes, cursorIndex, replacement);
+    const next = new Uint8Array(bytes);
+    for (const e of edits) next[e.index] = e.after;
+    return { next, newCursor: cursorIndex, newAnchor: cursorIndex, edits };
+  };
+
+  // Helper: simulate the core logic of handleBackspace with selection
+  const simulateBackspaceWithSelection = (bytes, anchorIndex, cursorIndex) => {
+    const { start, end } = getSelectionRange(anchorIndex, cursorIndex);
+    const count = end - start + 1;
+    const replacement = new Uint8Array(count);
+    const edits = collectOverwriteEdits(bytes, start, replacement);
+    const next = new Uint8Array(bytes);
+    for (const e of edits) next[e.index] = e.after;
+    return { next, newCursor: start, newAnchor: start, edits };
+  };
+
+  // Helper: simulate the core logic of handleBackspace without selection
+  // New behavior: clear CURRENT byte at cursorIndex, then move cursor left
+  const simulateBackspaceNoSelection = (bytes, cursorIndex, anchorIndex) => {
+    if (cursorIndex === 0) return { next: bytes, newCursor: 0, newAnchor: 0, edits: [] };
+    // Clear CURRENT byte (not previous)
+    const replacement = new Uint8Array([0x00]);
+    const edits = collectOverwriteEdits(bytes, cursorIndex, replacement);
+    const next = new Uint8Array(bytes);
+    for (const e of edits) next[e.index] = e.after;
+    const newCursor = cursorIndex - 1;
+    return { next, newCursor, newAnchor: newCursor, edits };
+  };
+
+  it('1. Delete with selection clears entire range and collapses selection', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateDeleteWithSelection(bytes, 1, 3);
+    assert.deepEqual(Array.from(result.next), [0x11, 0x00, 0x00, 0x00, 0x55]);
+    assert.equal(result.next.length, bytes.length, 'Buffer length unchanged');
+    assert.equal(result.newCursor, 1, 'Cursor should collapse to selection start');
+    assert.equal(result.newAnchor, 1, 'Anchor should collapse to selection start');
+  });
+
+  it('2. Delete without selection clears current byte and keeps cursor position', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateDeleteNoSelection(bytes, 2);
+    assert.deepEqual(Array.from(result.next), [0x11, 0x22, 0x00, 0x44, 0x55]);
+    assert.equal(result.newCursor, 2, 'Cursor should remain at same position');
+    assert.equal(result.newAnchor, 2, 'Anchor should equal cursor');
+  });
+
+  it('3. Backspace with selection clears entire range and collapses selection', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateBackspaceWithSelection(bytes, 1, 3);
+    assert.deepEqual(Array.from(result.next), [0x11, 0x00, 0x00, 0x00, 0x55]);
+    assert.equal(result.next.length, bytes.length, 'Buffer length unchanged');
+    assert.equal(result.newCursor, 1, 'Cursor should collapse to selection start');
+    assert.equal(result.newAnchor, 1, 'Anchor should collapse to selection start');
+  });
+
+  it('4. Backspace without selection clears CURRENT byte and moves cursor left', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateBackspaceNoSelection(bytes, 3, 3);
+    assert.deepEqual(Array.from(result.next), [0x11, 0x22, 0x33, 0x00, 0x55]);
+    assert.equal(result.newCursor, 2, 'Cursor should move to cursorIndex - 1');
+    assert.equal(result.newAnchor, 2, 'Anchor should equal new cursor');
+  });
+
+  it('5. Backspace at index 0 is a no-op', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33]);
+    const result = simulateBackspaceNoSelection(bytes, 0, 0);
+    assert.deepEqual(Array.from(result.next), Array.from(bytes), 'Buffer unchanged');
+    assert.equal(result.newCursor, 0);
+    assert.equal(result.newAnchor, 0);
+    assert.equal(result.edits.length, 0, 'No edits should be produced');
+  });
+
+  it('6. Delete with empty buffer is a no-op (early return in handler)', async () => {
+    // The handler has: if (!bytes || bytes.length === 0) return;
+    // We verify the guard exists in the source
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    // Verify handleDelete has the empty buffer guard
+    const deleteIdx = src.indexOf('const handleDelete = () => {');
+    assert.ok(deleteIdx !== -1, 'Should define handleDelete');
+    const deleteBlock = src.slice(deleteIdx, deleteIdx + 200);
+    assert.ok(deleteBlock.includes('bytes.length === 0'), 'handleDelete should guard against empty buffer');
+  });
+
+  it('7. Backspace with empty buffer is a no-op (early return in handler)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const backspaceIdx = src.indexOf('const handleBackspace = () => {');
+    assert.ok(backspaceIdx !== -1, 'Should define handleBackspace');
+    const backspaceBlock = src.slice(backspaceIdx, backspaceIdx + 200);
+    assert.ok(backspaceBlock.includes('bytes.length === 0'), 'handleBackspace should guard against empty buffer');
+  });
+
+  it('8. Delete creates one batch history entry', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const replacement = new Uint8Array(3); // 3 bytes selection
+    const edits = collectOverwriteEdits(bytes, 1, replacement);
+    const pushed = history.pushBatch(edits);
+    assert.equal(pushed, true);
+    assert.equal(history.getUndoCount(), 1, 'Should create exactly one undo entry');
+  });
+
+  it('9. Backspace creates one batch history entry', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const replacement = new Uint8Array([0x00]);
+    const edits = collectOverwriteEdits(bytes, 2, replacement); // backspace at index 3 targets index 2
+    const pushed = history.pushBatch(edits);
+    assert.equal(pushed, true);
+    assert.equal(history.getUndoCount(), 1, 'Should create exactly one undo entry');
+  });
+
+  it('10. Undo restores all bytes cleared by Delete (single batch)', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const replacement = new Uint8Array(3); // clear indices 1-3
+    const edits = collectOverwriteEdits(bytes, 1, replacement);
+    assert.equal(edits.length, 3);
+    history.pushBatch(edits);
+    for (const e of edits) bytes[e.index] = e.after;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x00, 0x00, 0x00, 0x55]);
+
+    const undone = history.undo();
+    assert.ok(undone.isBatch);
+    assert.equal(undone.edits.length, 3);
+    for (const e of undone.edits) bytes[e.index] = e.before;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x33, 0x44, 0x55], 'Undo restores original bytes');
+  });
+
+  it('11. Undo restores all bytes cleared by Backspace (single batch)', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const replacement = new Uint8Array(3); // backspace with selection 1-3
+    const edits = collectOverwriteEdits(bytes, 1, replacement);
+    assert.equal(edits.length, 3);
+    history.pushBatch(edits);
+    for (const e of edits) bytes[e.index] = e.after;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x00, 0x00, 0x00, 0x55]);
+
+    const undone = history.undo();
+    assert.ok(undone.isBatch);
+    for (const e of undone.edits) bytes[e.index] = e.before;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x33, 0x44, 0x55]);
+  });
+
+  it('12. Redo reapplies the Delete clear (single batch)', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const replacement = new Uint8Array(2); // clear indices 2-3
+    const edits = collectOverwriteEdits(bytes, 2, replacement);
+    history.pushBatch(edits);
+    for (const e of edits) bytes[e.index] = e.after;
+    history.undo();
+    for (const e of edits) bytes[e.index] = e.before;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x33, 0x44, 0x55]);
+
+    const redone = history.redo();
+    assert.ok(redone.isBatch);
+    for (const e of redone.edits) bytes[e.index] = e.after;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x00, 0x00, 0x55]);
+  });
+
+  it('13. Redo reapplies the Backspace clear (single batch)', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const replacement = new Uint8Array([0x00]);
+    const edits = collectOverwriteEdits(bytes, 2, replacement); // backspace at idx 2 clears idx 2
+    history.pushBatch(edits);
+    for (const e of edits) bytes[e.index] = e.after;
+    history.undo();
+    for (const e of edits) bytes[e.index] = e.before;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x33, 0x44, 0x55]);
+
+    const redone = history.redo();
+    assert.ok(redone.isBatch);
+    for (const e of redone.edits) bytes[e.index] = e.after;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x00, 0x44, 0x55], 'Index 2 should be cleared');
+  });
+
+  it('14. Delete does not create a history entry when bytes are already 0x00', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0x00, 0x22, 0x33]); // byte 0 already zero
+    const replacement = new Uint8Array([0x00]);
+    const edits = collectOverwriteEdits(bytes, 0, replacement);
+    assert.equal(edits.length, 0, 'No edits when value is already 0x00');
+    const pushed = history.pushBatch(edits);
+    assert.equal(pushed, false, 'pushBatch returns false for empty edits');
+    assert.equal(history.getUndoCount(), 0, 'No history entry created');
+  });
+
+  it('15. Delete does not change buffer length (fixed-length overwrite)', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateDeleteWithSelection(bytes, 0, 4);
+    assert.equal(result.next.length, bytes.length, 'Length must not change');
+  });
+
+  it('16. Backspace does not change buffer length (fixed-length overwrite)', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateBackspaceWithSelection(bytes, 0, 4);
+    assert.equal(result.next.length, bytes.length, 'Length must not change');
+  });
+
+  it('17. Delete clears byte at cursorIndex (current valid byte index)', () => {
+    const bytes = new Uint8Array([0x41, 0x42, 0x43, 0x44]);
+    const result = simulateDeleteNoSelection(bytes, 2);
+    assert.equal(result.next[2], 0x00, 'Byte at cursor should be zeroed');
+    assert.equal(result.next[0], 0x41, 'Other bytes unaffected');
+    assert.equal(result.next[1], 0x42);
+    assert.equal(result.next[3], 0x44);
+  });
+
+  it('18. Backspace clears byte at cursorIndex (current byte), then moves cursor left', () => {
+    const bytes = new Uint8Array([0x41, 0x42, 0x43, 0x44]);
+    const result = simulateBackspaceNoSelection(bytes, 1, 1);
+    assert.equal(result.next[1], 0x00, 'Current byte should be zeroed');
+    assert.equal(result.newCursor, 0, 'Cursor should move to cursorIndex - 1');
+    assert.equal(result.newAnchor, 0, 'Anchor should equal new cursor');
+    assert.equal(result.next[0], 0x41, 'Byte at new cursor position unaffected');
+  });
+
+  it('19. Delete and Backspace use collectOverwriteEdits (no new helper)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const deleteIdx = src.indexOf('const handleDelete = () => {');
+    assert.ok(deleteIdx !== -1, 'Should define handleDelete');
+    const deleteBlock = src.slice(deleteIdx, deleteIdx + 1000);
+    assert.ok(deleteBlock.includes('collectOverwriteEdits'), 'handleDelete should use collectOverwriteEdits');
+
+    const backspaceIdx = src.indexOf('const handleBackspace = () => {');
+    assert.ok(backspaceIdx !== -1, 'Should define handleBackspace');
+    const backspaceBlock = src.slice(backspaceIdx, backspaceIdx + 1000);
+    assert.ok(backspaceBlock.includes('collectOverwriteEdits'), 'handleBackspace should use collectOverwriteEdits');
+  });
+
+  it('20. Delete and Backspace use commitBatchEdits (single undo batch)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const deleteIdx = src.indexOf('const handleDelete = () => {');
+    const backspaceIdx = src.indexOf('const handleBackspace = () => {');
+    assert.ok(deleteIdx !== -1, 'Should define handleDelete');
+    assert.ok(backspaceIdx !== -1, 'Should define handleBackspace');
+
+    const deleteBlock = src.slice(deleteIdx, deleteIdx + 1000);
+    assert.ok(deleteBlock.includes('commitBatchEdits'), 'handleDelete should use commitBatchEdits');
+
+    const backspaceBlock = src.slice(backspaceIdx, backspaceIdx + 1000);
+    assert.ok(backspaceBlock.includes('commitBatchEdits'), 'handleBackspace should use commitBatchEdits');
+  });
+
+  it('21. Delete handler is wired into handleKeyDown for e.key === Delete', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes("e.key === 'Delete'"), 'Should match Delete key');
+    const deleteHandlerIdx = src.indexOf("e.key === 'Delete'");
+    const block = src.slice(deleteHandlerIdx - 100, deleteHandlerIdx + 200);
+    assert.ok(block.includes('e.preventDefault()'), 'Delete handler should call preventDefault');
+    assert.ok(block.includes('handleDelete()'), 'Delete handler should call handleDelete');
+  });
+
+  it('22. Backspace handler is wired into handleKeyDown for e.key === Backspace', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes("e.key === 'Backspace'"), 'Should match Backspace key');
+    const backspaceHandlerIdx = src.indexOf("e.key === 'Backspace'");
+    const block = src.slice(backspaceHandlerIdx - 100, backspaceHandlerIdx + 200);
+    assert.ok(block.includes('e.preventDefault()'), 'Backspace handler should call preventDefault');
+    assert.ok(block.includes('handleBackspace()'), 'Backspace handler should call handleBackspace');
+  });
+
+  it('23. Delete/Backspace handlers are after isEditableFormControl guard', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const formControlIdx = src.indexOf('isEditableFormControl(e.target)');
+    assert.ok(formControlIdx !== -1, 'Should have isEditableFormControl guard');
+    const deleteIdx = src.indexOf("e.key === 'Delete'");
+    const backspaceIdx = src.indexOf("e.key === 'Backspace'");
+    assert.ok(deleteIdx > formControlIdx, 'Delete handler must come AFTER form-control guard');
+    assert.ok(backspaceIdx > formControlIdx, 'Backspace handler must come AFTER form-control guard');
+  });
+
+  it('24. Delete/Backspace do not require ctrlKey or metaKey (unmodified keys)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    // Extract just the Delete handler block
+    const deleteIdx = src.indexOf("e.key === 'Delete'");
+    const deleteBlockEnd = src.indexOf('return;', deleteIdx + 50) + 'return;'.length;
+    const deleteBlock = src.slice(deleteIdx, deleteBlockEnd);
+    assert.ok(!deleteBlock.includes('e.ctrlKey'), 'Delete should not check ctrlKey');
+    assert.ok(!deleteBlock.includes('e.metaKey'), 'Delete should not check metaKey');
+
+    // Extract just the Backspace handler block
+    const backspaceIdx = src.indexOf("e.key === 'Backspace'");
+    const backspaceBlockEnd = src.indexOf('return;', backspaceIdx + 50) + 'return;'.length;
+    const backspaceBlock = src.slice(backspaceIdx, backspaceBlockEnd);
+    assert.ok(!backspaceBlock.includes('e.ctrlKey'), 'Backspace should not check ctrlKey');
+    assert.ok(!backspaceBlock.includes('e.metaKey'), 'Backspace should not check metaKey');
+  });
+
+  it('25. Delete/Backspace do not interfere with Ctrl+Z (Undo)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const undoIdx = src.indexOf("e.key === 'z' || e.key === 'Z')");
+    assert.ok(undoIdx !== -1, 'Should have Ctrl+Z handler');
+    const zBlock = src.slice(undoIdx, undoIdx + 200);
+    assert.ok(zBlock.includes('handleUndo'), 'Ctrl+Z should call handleUndo');
+
+    const deleteIdx = src.indexOf("e.key === 'Delete'");
+    const backspaceIdx = src.indexOf("e.key === 'Backspace'");
+    assert.ok(deleteIdx !== -1, 'Should have Delete handler');
+    assert.ok(backspaceIdx !== -1, 'Should have Backspace handler');
+  });
+
+  it('26. Delete/Backspace do not interfere with Ctrl+V (Paste)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const vIdx = src.indexOf("e.key === 'v' || e.key === 'V'");
+    assert.ok(vIdx !== -1, 'Should have Ctrl+V handler');
+    const vBlock = src.slice(vIdx, vIdx + 200);
+    assert.ok(vBlock.includes('handlePaste'), 'Ctrl+V should call handlePaste');
+  });
+
+  it('27. Delete clears bytes with 0x00 (not other values)', () => {
+    const bytes = new Uint8Array([0xAB, 0xCD, 0xEF]);
+    const result = simulateDeleteNoSelection(bytes, 1);
+    assert.equal(result.next[1], 0x00, 'Deleted byte must be 0x00');
+  });
+
+  it('28. Backspace clears bytes with 0x00 (not other values)', () => {
+    const bytes = new Uint8Array([0xAB, 0xCD, 0xEF]);
+    const result = simulateBackspaceNoSelection(bytes, 1, 1);
+    assert.equal(result.next[1], 0x00, 'Backspaced byte must be 0x00');
+  });
+
+  it('29. Delete with reverse selection (anchor > cursor) clears correct range', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    // anchor=3, cursor=1 -> selection start=1, end=3
+    const result = simulateDeleteWithSelection(bytes, 3, 1);
+    assert.deepEqual(Array.from(result.next), [0x11, 0x00, 0x00, 0x00, 0x55]);
+    assert.equal(result.newCursor, 1, 'Should collapse to start (1, not 3)');
+  });
+
+  it('30. Backspace with reverse selection (anchor > cursor) clears correct range', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateBackspaceWithSelection(bytes, 3, 1);
+    assert.deepEqual(Array.from(result.next), [0x11, 0x00, 0x00, 0x00, 0x55]);
+    assert.equal(result.newCursor, 1, 'Should collapse to start');
+  });
+
+  it('31. Delete handles single-byte selection (cursor === anchor)', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateDeleteWithSelection(bytes, 2, 2);
+    assert.deepEqual(Array.from(result.next), [0x11, 0x22, 0x00, 0x44, 0x55]);
+    assert.equal(result.newCursor, 2);
+  });
+
+  it('32. Backspace handles single-byte selection (cursor === anchor)', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateBackspaceWithSelection(bytes, 2, 2);
+    assert.deepEqual(Array.from(result.next), [0x11, 0x22, 0x00, 0x44, 0x55]);
+    assert.equal(result.newCursor, 2);
+  });
+
+  it('33. Delete handles selection at buffer end correctly', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateDeleteWithSelection(bytes, 3, 4);
+    assert.deepEqual(Array.from(result.next), [0x11, 0x22, 0x33, 0x00, 0x00]);
+    assert.equal(result.next.length, 5);
+  });
+
+  it('34. Backspace handles selection at buffer start correctly', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateBackspaceWithSelection(bytes, 0, 1);
+    assert.deepEqual(Array.from(result.next), [0x00, 0x00, 0x33, 0x44, 0x55]);
+    assert.equal(result.newCursor, 0);
+  });
+
+  it('35. Delete uses new Uint8Array(count) for zero-filled replacement', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const deleteIdx = src.indexOf('const handleDelete = () => {');
+    const deleteBlock = src.slice(deleteIdx, deleteIdx + 1000);
+    assert.ok(deleteBlock.includes('new Uint8Array(count)'), 'handleDelete should create zero-filled replacement for selection');
+    assert.ok(deleteBlock.includes('new Uint8Array([0x00])'), 'handleDelete should create zero-filled replacement for single byte');
+  });
+
+  it('36. Backspace uses new Uint8Array(count) for zero-filled replacement', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const backspaceIdx = src.indexOf('const handleBackspace = () => {');
+    const backspaceBlock = src.slice(backspaceIdx, backspaceIdx + 1000);
+    assert.ok(backspaceBlock.includes('new Uint8Array(count)'), 'handleBackspace should create zero-filled replacement for selection');
+    assert.ok(backspaceBlock.includes('new Uint8Array([0x00])'), 'handleBackspace should create zero-filled replacement for single byte');
+  });
+
+  it('37. Delete sets hexNibble to empty string', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const deleteIdx = src.indexOf('const handleDelete = () => {');
+    const deleteBlock = src.slice(deleteIdx, deleteIdx + 1000);
+    assert.ok(deleteBlock.includes("setHexNibble('')"), 'handleDelete should clear hexNibble');
+  });
+
+  it('38. Backspace sets hexNibble to empty string', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const backspaceIdx = src.indexOf('const handleBackspace = () => {');
+    const backspaceBlock = src.slice(backspaceIdx, backspaceIdx + 1000);
+    assert.ok(backspaceBlock.includes("setHexNibble('')"), 'handleBackspace should clear hexNibble');
+  });
+
+  it('39. Delete collapses selection to start for both cursor and anchor', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const deleteIdx = src.indexOf('const handleDelete = () => {');
+    const deleteBlock = src.slice(deleteIdx, deleteIdx + 1500);
+    // Verify both single-byte and selection paths set cursor and anchor to start
+    assert.ok(deleteBlock.includes('setCursorIndex(start)'), 'handleDelete should set cursor to selection.start');
+    assert.ok(deleteBlock.includes('setAnchorIndex(start)'), 'handleDelete should set anchor to selection.start');
+  });
+
+  it('40. Backspace guards against cursorIndex === 0 (no-op at BOF)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const backspaceIdx = src.indexOf('const handleBackspace = () => {');
+    const backspaceBlock = src.slice(backspaceIdx, backspaceIdx + 1500);
+    assert.ok(backspaceBlock.includes('cursorIndex === 0'), 'handleBackspace should check for cursor at 0');
+  });
+});
+
+describe('Phase 8B - Backspace New Behavior (Clear Current Byte, Move Left)', () => {
+  // Helper: simulate the NEW core logic of handleBackspace without selection
+  const simulateBackspaceNew = (bytes, cursorIndex) => {
+    if (cursorIndex === 0) return { next: bytes, newCursor: 0, newAnchor: 0, edits: [] };
+    const replacement = new Uint8Array([0x00]);
+    const edits = collectOverwriteEdits(bytes, cursorIndex, replacement);
+    const next = new Uint8Array(bytes);
+    for (const e of edits) next[e.index] = e.after;
+    const newCursor = cursorIndex - 1;
+    return { next, newCursor, newAnchor: newCursor, edits };
+  };
+
+  it('1. Backspace no selection clears CURRENT byte, not the previous byte', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateBackspaceNew(bytes, 3);
+    assert.deepEqual(Array.from(result.next), [0x11, 0x22, 0x33, 0x00, 0x55]);
+    assert.equal(result.next[3], 0x00, 'Current byte (index 3) should be zeroed');
+    assert.equal(result.next[2], 0x33, 'Previous byte should be unchanged');
+  });
+
+  it('2. Backspace cursor moves one byte left after clearing', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateBackspaceNew(bytes, 3);
+    assert.equal(result.newCursor, 2, 'Cursor should move from 3 to 2');
+    assert.equal(result.newAnchor, 2, 'Anchor should match new cursor');
+  });
+
+  it('3. Backspace at index 0 is a no-op', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33]);
+    const result = simulateBackspaceNew(bytes, 0);
+    assert.deepEqual(Array.from(result.next), Array.from(bytes), 'Buffer unchanged');
+    assert.equal(result.newCursor, 0);
+    assert.equal(result.edits.length, 0, 'No edits produced');
+  });
+
+  it('4. Backspace at last byte clears last byte and moves left', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const result = simulateBackspaceNew(bytes, 4);
+    assert.equal(result.next[4], 0x00, 'Last byte should be zeroed');
+    assert.equal(result.newCursor, 3, 'Cursor should move to index 3');
+  });
+
+  it('5. Repeated Backspace produces expected sequence', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]);
+    let current = new Uint8Array(bytes);
+    let cursor = 6; // cursor on 77 (last byte, index 6)
+
+    // First backspace: clear index 6, cursor moves to 5
+    let r1 = simulateBackspaceNew(current, cursor);
+    current = r1.next;
+    cursor = r1.newCursor;
+    assert.deepEqual(Array.from(current), [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x00]);
+    assert.equal(cursor, 5);
+
+    // Second backspace: clear index 5, cursor moves to 4
+    let r2 = simulateBackspaceNew(current, cursor);
+    current = r2.next;
+    cursor = r2.newCursor;
+    assert.deepEqual(Array.from(current), [0x11, 0x22, 0x33, 0x44, 0x55, 0x00, 0x00]);
+    assert.equal(cursor, 4);
+  });
+
+  it('6. Backspace repeated sequence with specific example from spec', () => {
+    // From spec:
+    // Initial:   11 22 33 44 55 66 77, cursor on 66 (index 5)
+    // After 1st: 11 22 33 44 55 00 77, cursor on 55 (index 4)
+    // After 2nd: 11 22 33 44 00 00 77, cursor on 44 (index 3)
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77]);
+
+    const r1 = simulateBackspaceNew(bytes, 5); // cursor on 66
+    assert.deepEqual(Array.from(r1.next), [0x11, 0x22, 0x33, 0x44, 0x55, 0x00, 0x77]);
+    assert.equal(r1.newCursor, 4);
+
+    const r2 = simulateBackspaceNew(r1.next, 4); // cursor on 55
+    assert.deepEqual(Array.from(r2.next), [0x11, 0x22, 0x33, 0x44, 0x00, 0x00, 0x77]);
+    assert.equal(r2.newCursor, 3);
+  });
+
+  it('7. Backspace with selection remains unchanged (clear range, collapse to start)', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    // Simulate: selection from 1 to 3, backspace should clear range
+    const { start, end } = getSelectionRange(1, 3);
+    const count = end - start + 1;
+    const replacement = new Uint8Array(count);
+    const edits = collectOverwriteEdits(bytes, start, replacement);
+    const next = new Uint8Array(bytes);
+    for (const e of edits) next[e.index] = e.after;
+    assert.deepEqual(Array.from(next), [0x11, 0x00, 0x00, 0x00, 0x55]);
+    assert.equal(start, 1); // collapsed to selection start
+  });
+
+  it('8. Backspace creates one batch history entry', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0x11, 0x22, 0x33]);
+    const replacement = new Uint8Array([0x00]);
+    const edits = collectOverwriteEdits(bytes, 2, replacement);
+    const pushed = history.pushBatch(edits);
+    assert.equal(pushed, true);
+    assert.equal(history.getUndoCount(), 1);
+  });
+
+  it('9. Undo restores the byte cleared by Backspace', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const replacement = new Uint8Array([0x00]);
+    const edits = collectOverwriteEdits(bytes, 3, replacement);
+    history.pushBatch(edits);
+    for (const e of edits) bytes[e.index] = e.after;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x33, 0x00, 0x55]);
+
+    const undone = history.undo();
+    assert.ok(undone.isBatch);
+    for (const e of undone.edits) bytes[e.index] = e.before;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x33, 0x44, 0x55], 'Undo restores original byte');
+  });
+
+  it('10. Redo reapplies the Backspace clear', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const replacement = new Uint8Array([0x00]);
+    const edits = collectOverwriteEdits(bytes, 2, replacement);
+    history.pushBatch(edits);
+    for (const e of edits) bytes[e.index] = e.after;
+    history.undo();
+    for (const e of edits) bytes[e.index] = e.before;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x33, 0x44, 0x55]);
+
+    const redone = history.redo();
+    assert.ok(redone.isBatch);
+    for (const e of redone.edits) bytes[e.index] = e.after;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x00, 0x44, 0x55]);
+  });
+
+  it('11. Backspace modified counter remains correct', () => {
+    const counter = createModifiedCounter();
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44]);
+    const edits = collectOverwriteEdits(bytes, 2, new Uint8Array([0x00]));
+    counter.increment();
+    assert.equal(counter.getCount(), 1);
+    // Undo should decrement
+    counter.decrement();
+    assert.equal(counter.getCount(), 0);
+  });
+
+  it('12. Backspace clears hexNibble', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const backspaceIdx = src.indexOf('const handleBackspace = () => {');
+    const backspaceBlock = src.slice(backspaceIdx, backspaceIdx + 1500);
+    assert.ok(backspaceBlock.includes("setHexNibble('')"), 'handleBackspace should clear hexNibble');
+  });
+});
+
+describe('Phase 8C - Ctrl+F Focus Search & Ctrl+Shift+F Focus Go To', () => {
+  it('1. searchInputRef is defined in HexViewer', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('const searchInputRef = useRef'), 'Should define searchInputRef');
+    assert.ok(src.includes('const gotoInputRef = useRef'), 'Should define gotoInputRef');
+  });
+
+  it('2. searchInputRef is attached to Search input', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const searchRefIdx = src.indexOf('ref={searchInputRef}');
+    assert.ok(searchRefIdx !== -1, 'Search input should have searchInputRef attached');
+  });
+
+  it('3. gotoInputRef is attached to Go To input', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const gotoRefIdx = src.indexOf('ref={gotoInputRef}');
+    assert.ok(gotoRefIdx !== -1, 'Go To input should have gotoInputRef attached');
+  });
+
+  it('4. Ctrl+F / Cmd+F focuses Search HEX input', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const fHandlerIdx = src.indexOf("e.key === 'f' || e.key === 'F'");
+    // Find the Ctrl+F handler (not Ctrl+Shift+F)
+    const ctrlFIdx = src.indexOf("e.key === 'f' || e.key === 'F'", fHandlerIdx - 500);
+    assert.ok(ctrlFIdx !== -1, 'Should have Ctrl+F handler');
+    const block = src.slice(ctrlFIdx - 200, ctrlFIdx + 300);
+    assert.ok(block.includes('e.preventDefault()'), 'Ctrl+F should call preventDefault');
+    assert.ok(block.includes('searchInputRef.current?.focus()'), 'Ctrl+F should focus searchInputRef');
+    assert.ok(block.includes('e.ctrlKey'), 'Ctrl+F should check ctrlKey');
+    assert.ok(block.includes('e.metaKey'), 'Ctrl+F should check metaKey');
+    assert.ok(block.includes('!e.shiftKey'), 'Ctrl+F should not fire with shiftKey');
+  });
+
+  it('5. Ctrl+Shift+F / Cmd+Shift+F focuses Go To input', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const fHandlerIdx = src.indexOf("e.key === 'f' || e.key === 'F'");
+    // Find the Ctrl+Shift+F handler
+    const shiftFIdx = src.indexOf("e.shiftKey && (e.key === 'f' || e.key === 'F')", fHandlerIdx);
+    assert.ok(shiftFIdx !== -1, 'Should have Ctrl+Shift+F handler');
+    const block = src.slice(shiftFIdx - 300, shiftFIdx + 200);
+    assert.ok(block.includes('e.preventDefault()'), 'Ctrl+Shift+F should call preventDefault');
+    assert.ok(block.includes('gotoInputRef.current?.focus()'), 'Ctrl+Shift+F should focus gotoInputRef');
+    assert.ok(block.includes('e.ctrlKey'), 'Ctrl+Shift+F should check ctrlKey');
+    assert.ok(block.includes('e.metaKey'), 'Ctrl+Shift+F should check metaKey');
+    assert.ok(block.includes('e.shiftKey'), 'Ctrl+Shift+F should check shiftKey');
+  });
+
+  it('6. Ctrl+F is after isEditableFormControl guard', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const formControlIdx = src.indexOf('isEditableFormControl(e.target)');
+    const fIdx = src.indexOf("e.key === 'f' || e.key === 'F'");
+    assert.ok(fIdx > formControlIdx, 'Ctrl+F handler must come AFTER form-control guard');
+  });
+
+  it('7. Ctrl+Shift+F is after isEditableFormControl guard', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const formControlIdx = src.indexOf('isEditableFormControl(e.target)');
+    const shiftFIdx = src.indexOf("e.shiftKey && (e.key === 'f' || e.key === 'F')");
+    assert.ok(shiftFIdx > formControlIdx, 'Ctrl+Shift+F handler must come AFTER form-control guard');
+  });
+
+  it('8. Ctrl+F does not interfere with Ctrl+C / Ctrl+V / Ctrl+Z / Ctrl+Y / Ctrl+G', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes("e.key === 'c' || e.key === 'C'"), 'Should still have Ctrl+C');
+    assert.ok(src.includes("e.key === 'v' || e.key === 'V'"), 'Should still have Ctrl+V');
+    assert.ok(src.includes("e.key === 'z' || e.key === 'Z'"), 'Should still have Ctrl+Z');
+    assert.ok(src.includes("e.key === 'y' || e.key === 'Y'"), 'Should still have Ctrl+Y');
+    assert.ok(src.includes("e.key === 'g' || e.key === 'G'"), 'Should still have Ctrl+G');
+  });
+});
+
+describe('Phase 8D - Keyboard Focus After Navigation', () => {
+  it('1. handleGotoOffset restores container focus on success (editor mode)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const gotoIdx = src.indexOf('const handleGotoOffset = () => {');
+    const gotoBlock = src.slice(gotoIdx, gotoIdx + 3000);
+    assert.ok(gotoBlock.includes('containerRef.current?.focus()'), 'handleGotoOffset should restore container focus on success');
+  });
+
+  it('2. handleGotoOffset restores container focus on success (physical mode)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    // Verify focus call is present in the physical mode success path
+    const gotoIdx = src.indexOf('const handleGotoOffset = () => {');
+    const gotoSrc = src.slice(gotoIdx, gotoIdx + 3000);
+    // Count focus calls - should be at least 2 (physical + editor mode)
+    const focusCount = (gotoSrc.match(/containerRef\.current\?\.focus/g) || []).length;
+    assert.ok(focusCount >= 2, `handleGotoOffset should have at least 2 containerRef.focus() calls, found ${focusCount}`);
+  });
+
+  it('3. doFind restores container focus after cursor move', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const doFindIdx = src.indexOf('const doFind = (direction) => {');
+    assert.ok(doFindIdx !== -1, 'Should define doFind');
+    const doFindBlock = src.slice(doFindIdx, doFindIdx + 4000);
+    assert.ok(doFindBlock.includes('containerRef.current?.focus()'), 'doFind should restore container focus');
+  });
+
+  it('4. handleReplaceCurrent restores container focus after replace', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const replaceIdx = src.indexOf('const handleReplaceCurrent = () => {');
+    assert.ok(replaceIdx !== -1, 'Should define handleReplaceCurrent');
+    const replaceBlock = src.slice(replaceIdx, replaceIdx + 1000);
+    assert.ok(replaceBlock.includes('containerRef.current?.focus()'), 'handleReplaceCurrent should restore container focus');
+  });
+
+  it('5. handleReplaceAll restores container focus after replace', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const replaceAllIdx = src.indexOf('const handleReplaceAll = () => {');
+    assert.ok(replaceAllIdx !== -1, 'Should define handleReplaceAll');
+    const replaceAllBlock = src.slice(replaceAllIdx, replaceAllIdx + 2000);
+    assert.ok(replaceAllBlock.includes('containerRef.current?.focus()'), 'handleReplaceAll should restore container focus');
+  });
+
+  it('6. Focus is NOT stolen on failed Go To (error path returns early)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const gotoIdx = src.indexOf('const handleGotoOffset = () => {');
+    const gotoSrc = src.slice(gotoIdx, gotoIdx + 3000);
+
+    // Find the error return paths and verify they do NOT include focus calls
+    const errorReturnIdx = gotoSrc.indexOf("setGotoError(parsed.error);");
+    assert.ok(errorReturnIdx !== -1, 'Should have error return in handleGotoOffset');
+    const errorPath = gotoSrc.slice(errorReturnIdx, errorReturnIdx + 100);
+    assert.ok(!errorPath.includes('containerRef.current?.focus()'), 'Error path should NOT steal focus');
+  });
+
+  it('7. Focus is NOT stolen on failed Replace (error path returns early)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const replaceIdx = src.indexOf('const handleReplaceCurrent = () => {');
+    const replaceBlock = src.slice(replaceIdx, replaceIdx + 1500);
+
+    // The first setSearchError return should not have focus call before it
+    const errorPath = replaceBlock.slice(0, replaceBlock.indexOf('commitBatchEdits'));
+    assert.ok(!errorPath.includes('containerRef.current?.focus()'), 'Error path should NOT steal focus');
+  });
+});

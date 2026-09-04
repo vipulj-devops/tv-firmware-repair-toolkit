@@ -76,6 +76,8 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
   const [menuKey, setMenuKey] = useState(0);
   const scrollRef = useRef(null);
   const containerRef = useRef(null);
+  const searchInputRef = useRef(null);
+  const gotoInputRef = useRef(null);
   const [viewportH, setViewportH] = useState(420);
 
       // Unified offset map: use offsetMap if provided, otherwise convert baseOffset
@@ -399,6 +401,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
       setAnchorIndex(clamped.value);
       setHexNibble('');
       scrollToIndex(clamped.value);
+      containerRef.current?.focus();
       return;
     }
 
@@ -422,7 +425,8 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
       } else if (targetTop + ROW_HEIGHT > container.scrollTop + container.clientHeight) {
         container.scrollTop = targetTop + ROW_HEIGHT - container.clientHeight;
       }
-   }
+    }
+    containerRef.current?.focus();
   };
 
   const scrollToIndex = (idx) => {
@@ -502,6 +506,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
     setCursorIndex(idx);
     setAnchorIndex(idx);
     scrollToIndex(idx);
+    containerRef.current?.focus();
   };
 
   const handleFindNext = () => doFind('next');
@@ -523,6 +528,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
       return;
     }
     commitBatchEdits(edits);
+    containerRef.current?.focus();
   };
 
   const handleReplaceAll = () => {
@@ -545,6 +551,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
       return;
     }
     commitBatchEdits(result.edits);
+    containerRef.current?.focus();
   };
 
   const handleClearSearch = () => {
@@ -556,6 +563,64 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
     setSearchError(null);
     setLastParsedPattern(null);
     lastMatchesRef.current = [];
+  };
+
+  // Delete handler - clears current byte(s) with 0x00 (fixed-length overwrite)
+  const handleDelete = () => {
+    if (!bytes || bytes.length === 0) return;
+    const { start, end } = getSelectionRange(anchorIndex, cursorIndex);
+    const count = end - start + 1;
+    if (count > 1) {
+      // Selection: clear entire range, collapse to start
+      const replacement = new Uint8Array(count);
+      const edits = collectOverwriteEdits(bytes, start, replacement);
+      if (edits.length) {
+        commitBatchEdits(edits);
+      }
+      setCursorIndex(start);
+      setAnchorIndex(start);
+      setHexNibble('');
+    } else {
+      // Single byte at cursorIndex
+      const replacement = new Uint8Array([0x00]);
+      const edits = collectOverwriteEdits(bytes, cursorIndex, replacement);
+      if (edits.length) {
+        commitBatchEdits(edits);
+      }
+      setCursorIndex(cursorIndex);
+      setAnchorIndex(cursorIndex);
+      setHexNibble('');
+    }
+  };
+
+  // Backspace handler - clears previous byte(s) with 0x00 (fixed-length overwrite)
+  const handleBackspace = () => {
+    if (!bytes || bytes.length === 0) return;
+    const { start, end } = getSelectionRange(anchorIndex, cursorIndex);
+    const count = end - start + 1;
+    if (count > 1) {
+      // Selection: clear entire range, collapse to start
+      const replacement = new Uint8Array(count);
+      const edits = collectOverwriteEdits(bytes, start, replacement);
+      if (edits.length) {
+        commitBatchEdits(edits);
+      }
+      setCursorIndex(start);
+      setAnchorIndex(start);
+      setHexNibble('');
+    } else {
+      // No selection: clear CURRENT byte at cursorIndex, then move cursor left
+      if (cursorIndex === 0) return; // at buffer start, no-op
+      const replacement = new Uint8Array([0x00]);
+      const edits = collectOverwriteEdits(bytes, cursorIndex, replacement);
+      if (edits.length) {
+        commitBatchEdits(edits);
+      }
+      const newCursor = cursorIndex - 1;
+      setCursorIndex(newCursor);
+      setAnchorIndex(newCursor);
+      setHexNibble('');
+    }
   };
 
   // Paste (Ctrl+V) handler - overwrites selected bytes with hex from clipboard
@@ -662,6 +727,34 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
     // This lets text inputs, textareas, selects, buttons, and other controls
     // receive normal keyboard behavior without interfering with the hex editor.
     if (isEditableFormControl(e.target)) {
+      return;
+    }
+
+    // Ctrl+F / Cmd+F → focus Search HEX input
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+      e.preventDefault();
+      searchInputRef.current?.focus();
+      return;
+    }
+
+    // Ctrl+Shift+F / Cmd+Shift+F → focus Go To input
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+      e.preventDefault();
+      gotoInputRef.current?.focus();
+      return;
+    }
+
+    // Delete - clear current byte(s) with 0x00 (fixed-length overwrite)
+    if (e.key === 'Delete') {
+      e.preventDefault();
+      handleDelete();
+      return;
+    }
+
+    // Backspace - clear previous byte(s) with 0x00 (fixed-length overwrite)
+    if (e.key === 'Backspace') {
+      e.preventDefault();
+      handleBackspace();
       return;
     }
 
@@ -797,6 +890,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
         <div className="relative flex-1 min-w-0">
           <Search className="w-3 h-3 text-muted-foreground absolute left-2 top-1/2 -translate-y-1/2" />
           <input
+            ref={searchInputRef}
             value={query}
             onChange={(e) => { setQuery(e.target.value); setSearchError(null); }}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleFindNext(); } }}
@@ -855,6 +949,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
         <span className="text-[11px] text-muted-foreground shrink-0">Go To:</span>
         <div className="relative">
           <input
+            ref={gotoInputRef}
             value={gotoInput}
             onChange={(e) => { setGotoInput(e.target.value); setGotoError(null); }}
             onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); handleGotoOffset(); } if (e.key === 'Escape') { setGotoInput(''); setGotoError(null); } }}
