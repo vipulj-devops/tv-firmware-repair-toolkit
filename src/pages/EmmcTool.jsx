@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useLayoutEffect } from 'react';
 import { Download, RotateCcw, HardDrive, FolderArchive, FolderInput, ArrowLeft, Save, Upload, ShieldCheck } from 'lucide-react';
 import ToolNav from '@/components/ToolNav';
 import FileDropzone from '@/components/tv/FileDropzone';
@@ -45,10 +45,33 @@ export default function EmmcTool() {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(null); // { label, percent } | null
   const [selected, setSelected] = useState(new Set());
+  const [partitionFilters, setPartitionFilters] = useState({ query: '', typeFilter: '', fsFilter: '' });
   const replaceInputRef = useRef(null);
   const replaceTarget = useRef(null);
   const folderInputRef = useRef(null);
   const replaceSelectedInputRef = useRef(null);
+  const tableContainerRef = useRef(null);
+  const savedScrollRef = useRef(null);
+
+  useLayoutEffect(() => {
+    if (!explorePart && savedScrollRef.current) {
+      const saved = savedScrollRef.current;
+      savedScrollRef.current = null;
+      const restore = () => {
+        if (typeof window !== 'undefined') {
+          window.scrollTo(0, saved.main);
+        }
+        if (tableContainerRef.current) {
+          tableContainerRef.current.scrollTop = saved.tableTop;
+          tableContainerRef.current.scrollLeft = saved.tableLeft;
+        }
+      };
+      restore();
+      if (typeof requestAnimationFrame !== 'undefined') {
+        requestAnimationFrame(restore);
+      }
+    }
+  }, [explorePart]);
 
   const gptParts = useMemo(() => (gptBytes && file1 ? autoMapPartitions(gptBytes, file1.size) : []), [gptBytes, file1]);
   const firmwareAnalysis = useMemo(() => (gptBytes && file1 ? analyzeFirmware(gptBytes, file1.name, file1.size, tailBytes) : null), [gptBytes, file1, tailBytes]);
@@ -111,6 +134,8 @@ export default function EmmcTool() {
     setOverlays({});
     setOverlayTick(0);
     setAsyncFsHits([]);
+    setPartitionFilters({ query: '', typeFilter: '', fsFilter: '' });
+    savedScrollRef.current = null;
     setExplorePart(null);
     setExploreBytes(null);
     setExploreReader(null);
@@ -187,6 +212,8 @@ export default function EmmcTool() {
     setOverlayTick(0);
     setExt4Map({});
     setLog([]);
+    setPartitionFilters({ query: '', typeFilter: '', fsFilter: '' });
+    savedScrollRef.current = null;
     setExplorePart(null);
     setExploreBytes(null);
     setExploreReader(null);
@@ -433,6 +460,11 @@ export default function EmmcTool() {
   };
 
   const explore = async (p) => {
+    savedScrollRef.current = {
+      main: typeof window !== 'undefined' ? (window.scrollY || document.documentElement?.scrollTop || 0) : 0,
+      tableTop: tableContainerRef.current ? tableContainerRef.current.scrollTop : 0,
+      tableLeft: tableContainerRef.current ? tableContainerRef.current.scrollLeft : 0,
+    };
     setBusy(true);
     try {
       const session = await loadExplorePartition({
@@ -603,7 +635,7 @@ export default function EmmcTool() {
               <div className="lg:col-span-2 rounded-xl border border-border bg-card overflow-hidden flex flex-col min-h-0 max-h-[min(36rem,70vh)]">
                 <div className="px-3 py-2 border-b border-border text-sm font-semibold flex items-center gap-2 shrink-0"><HardDrive className="w-4 h-4 text-sky-600" /> Partition Table</div>
                 <div className="p-2 flex-1 min-h-0 flex flex-col">
-                  <PartitionTable parts={parts} ext4Map={ext4Map} selected={selected} onToggle={toggleSelect} onToggleAll={toggleAll} onSave={savePartition} onReplace={(p) => { replaceTarget.current = p; replaceInputRef.current?.click(); }} onExplore={explore} />
+                  <PartitionTable parts={parts} ext4Map={ext4Map} selected={selected} onToggle={toggleSelect} onToggleAll={toggleAll} onSave={savePartition} onReplace={(p) => { replaceTarget.current = p; replaceInputRef.current?.click(); }} onExplore={explore} filters={partitionFilters} onFilterChange={setPartitionFilters} containerRef={tableContainerRef} />
                 </div>
               </div>
               <div className="space-y-4">

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo } from 'react';
 import { Save, Upload, FolderOpen, Search, X } from 'lucide-react';
 import { formatBytes } from '@/lib/binaryUtils';
 
@@ -104,16 +104,39 @@ function PartitionLegend() {
   );
 }
 
-export default function PartitionTable({ parts, ext4Map, selected, onToggle, onToggleAll, onSave, onReplace, onExplore }) {
-  const [query, setQuery] = useState('');
-  const [typeFilter, setTypeFilter] = useState('');
-  const [fsFilter, setFsFilter] = useState('');
+export default function PartitionTable({
+  parts,
+  ext4Map,
+  selected,
+  onToggle,
+  onToggleAll,
+  onSave,
+  onReplace,
+  onExplore,
+  filters,
+  onFilterChange,
+  containerRef,
+}) {
+  const query = filters ? filters.query : '';
+  const typeFilter = filters ? filters.typeFilter : '';
+  const fsFilter = filters ? filters.fsFilter : '';
 
-  useEffect(() => {
-    setQuery('');
-    setTypeFilter('');
-    setFsFilter('');
-  }, [parts]);
+  const updateFilter = (key, value) => {
+    if (onFilterChange) {
+      onFilterChange({
+        query,
+        typeFilter,
+        fsFilter,
+        [key]: value,
+      });
+    }
+  };
+
+  const clearFilters = () => {
+    if (onFilterChange) {
+      onFilterChange({ query: '', typeFilter: '', fsFilter: '' });
+    }
+  };
 
   const typeOptions = useMemo(() => {
     const set = new Set();
@@ -138,11 +161,6 @@ export default function PartitionTable({ parts, ext4Map, selected, onToggle, onT
   }, [parts, query, typeFilter, fsFilter, ext4Map]);
 
   const filtersActive = query.trim() !== '' || typeFilter !== '' || fsFilter !== '';
-  const clearFilters = () => {
-    setQuery('');
-    setTypeFilter('');
-    setFsFilter('');
-  };
 
   if (!parts.length) return <p className="text-sm text-muted-foreground p-4">No partitions found in this dump.</p>;
 
@@ -158,7 +176,7 @@ export default function PartitionTable({ parts, ext4Map, selected, onToggle, onT
           <input
             type="search"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => updateFilter('query', e.target.value)}
             placeholder="Search name"
             aria-label="Search partitions by name"
             className={`${controlClass} w-full pl-7`}
@@ -168,7 +186,7 @@ export default function PartitionTable({ parts, ext4Map, selected, onToggle, onT
           Type
           <select
             value={typeFilter}
-            onChange={(e) => setTypeFilter(e.target.value)}
+            onChange={(e) => updateFilter('typeFilter', e.target.value)}
             aria-label="Filter by partition type"
             className={`${controlClass} min-w-[7rem]`}
           >
@@ -182,7 +200,7 @@ export default function PartitionTable({ parts, ext4Map, selected, onToggle, onT
           Filesystem
           <select
             value={fsFilter}
-            onChange={(e) => setFsFilter(e.target.value)}
+            onChange={(e) => updateFilter('fsFilter', e.target.value)}
             aria-label="Filter by filesystem"
             className={`${controlClass} min-w-[7rem]`}
           >
@@ -203,7 +221,7 @@ export default function PartitionTable({ parts, ext4Map, selected, onToggle, onT
         )}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-x-auto overflow-y-auto">
+      <div ref={containerRef} className="flex-1 min-h-0 overflow-x-auto overflow-y-auto">
         {visible.length === 0 ? (
           <div className="px-3 py-8 text-center text-sm text-muted-foreground">
             <p>No matching partitions</p>
