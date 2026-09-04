@@ -269,6 +269,35 @@ export function parseSearchPattern(input, mode = 'hex') {
   return { ok: true, error: null, needle, mode: 'ascii' };
 }
 
+export function parsePasteHex(input) {
+  if (input == null) return { ok: false, error: '', needle: null };
+  const trimmed = String(input).trim();
+  if (trimmed === '') return { ok: false, error: '', needle: null };
+
+  let clean = trimmed;
+  if (/^0[xX]/.test(clean)) {
+    clean = clean.slice(2);
+  }
+
+  if (!/^[0-9a-fA-F\s]+$/.test(clean)) {
+    return { ok: false, error: 'Clipboard content is not valid hexadecimal.', needle: null };
+  }
+
+  clean = clean.replace(/\s+/g, '');
+
+  if (clean.length === 0) return { ok: false, error: '', needle: null };
+
+  if (clean.length % 2 !== 0) {
+    return { ok: false, error: 'Hex pattern must have an even number of digits.', needle: null };
+  }
+
+  const needle = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < needle.length; i++) {
+    needle[i] = parseInt(clean.substr(i * 2, 2), 16);
+  }
+  return { ok: true, error: null, needle };
+}
+
 export function findNextMatch(haystack, needle, start = 0) {
   if (!haystack || !needle || needle.length === 0) return -1;
   if (needle.length > haystack.length) return -1;

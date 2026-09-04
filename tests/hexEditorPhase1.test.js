@@ -20,7 +20,8 @@ import {
   formatByteValue,
   formatSelectionSize,
   createModifiedCounter,
-  parseSearchPattern,
+   parseSearchPattern,
+   parsePasteHex,
   findNextMatch,
   findPreviousMatch,
   findAllMatches,
@@ -2597,15 +2598,18 @@ describe('Phase 4B-4 — HexViewer Context Menu', () => {
     assert.equal(anchorIndex, 50);
   });
 
-  it('17. No Paste/Cut actions in context menu (out of scope)', async () => {
+  it('17. Paste exists in context menu (wired to handlePaste, disabled when no bytes)', async () => {
     const { readFileSync } = await import('node:fs');
     const { join, dirname } = await import('node:path');
     const { fileURLToPath } = await import('node:url');
     const dir = dirname(fileURLToPath(import.meta.url));
     const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
 
-    assert.ok(!src.includes('handlePaste'), 'Paste should not be implemented');
-    assert.ok(!src.includes('>Paste<'), 'Paste menu item should not exist');
+    assert.ok(src.includes('handlePaste'), 'handlePaste should be implemented for Ctrl+V');
+    assert.ok(src.includes(' /> Paste'), 'Paste context menu item should exist');
+    assert.ok(src.includes('onSelect={handlePaste}'), 'Paste menu item should be wired to handlePaste');
+    assert.ok(src.includes('!bytes || bytes.length === 0'), 'Paste should use bytes-empty disabled condition');
+    assert.ok(src.includes('Ctrl+V'), 'Paste should have Ctrl+V shortcut in context menu');
     assert.ok(!src.includes('>Cut<'), 'Cut menu item should not exist');
   });
 
@@ -2965,3 +2969,417 @@ describe('Phase 4B-4 — HexViewer Context Menu', () => {
       assert.equal(count3, 8);
     });
   });
+
+describe('Phase 7 - Ctrl+V Paste', () => {
+  it('1. parsePasteHex accepts space-separated hex', () => {
+    const r = parsePasteHex('AA BB CC');
+    assert.ok(r.ok);
+    assert.equal(r.needle.length, 3);
+    assert.deepEqual(Array.from(r.needle), [0xaa, 0xbb, 0xcc]);
+  });
+
+  it('2. parsePasteHex accepts run-together hex', () => {
+    const r = parsePasteHex('AABBCC');
+    assert.ok(r.ok);
+    assert.equal(r.needle.length, 3);
+    assert.deepEqual(Array.from(r.needle), [0xaa, 0xbb, 0xcc]);
+  });
+
+  it('3. parsePasteHex accepts optional single leading 0x', () => {
+    const r = parsePasteHex('0xAABBCC');
+    assert.ok(r.ok);
+    assert.equal(r.needle.length, 3);
+    assert.deepEqual(Array.from(r.needle), [0xaa, 0xbb, 0xcc]);
+  });
+
+  it('4. parsePasteHex accepts multiline whitespace-separated hex', () => {
+    const r = parsePasteHex('AA BB\nCC DD\r\nEE FF');
+    assert.ok(r.ok);
+    assert.equal(r.needle.length, 6);
+    assert.deepEqual(Array.from(r.needle), [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
+  });
+
+  it('5. parsePasteHex accepts lowercase hex', () => {
+    const r = parsePasteHex('aadd');
+    assert.ok(r.ok);
+    assert.equal(r.needle.length, 2);
+    assert.deepEqual(Array.from(r.needle), [0xaa, 0xdd]);
+  });
+
+  it('6. parsePasteHex accepts mixed case hex', () => {
+    const r = parsePasteHex('AaBb');
+    assert.ok(r.ok);
+    assert.equal(r.needle.length, 2);
+    assert.deepEqual(Array.from(r.needle), [0xaa, 0xbb]);
+  });
+
+  it('7. parsePasteHex empty input returns ok:false with empty error (silent no-op)', () => {
+    const r = parsePasteHex('');
+    assert.equal(r.ok, false);
+    assert.equal(r.error, '');
+    assert.equal(r.needle, null);
+  });
+
+  it('8. parsePasteHex whitespace-only input returns ok:false with empty error (silent no-op)', () => {
+    const r = parsePasteHex('   \n\t  ');
+    assert.equal(r.ok, false);
+    assert.equal(r.error, '');
+  });
+
+  it('9. parsePasteHex rejects invalid characters (Hello World)', () => {
+    const r = parsePasteHex('Hello World');
+    assert.equal(r.ok, false);
+    assert.ok(r.error.length > 0, 'Should have non-empty error for invalid chars');
+  });
+
+  it('10. parsePasteHex rejects arbitrary text containing hex-looking characters (COFFEE)', () => {
+    const r = parsePasteHex('COFFEE');
+    assert.equal(r.ok, false);
+    assert.ok(r.error.length > 0);
+  });
+
+  it('11. parsePasteHex rejects odd-length hex', () => {
+    const r = parsePasteHex('ABC');
+    assert.equal(r.ok, false);
+    assert.ok(r.error.length > 0);
+  });
+
+  it('12. parsePasteHex rejects odd-length hex with 0x prefix', () => {
+    const r = parsePasteHex('0xABC');
+    assert.equal(r.ok, false);
+    assert.equal(r.error.length > 0, true);
+  });
+
+  it('13. parsePasteHex handles null/undefined input as empty (silent no-op)', () => {
+    assert.equal(parsePasteHex(null).ok, false);
+    assert.equal(parsePasteHex(null).error, '');
+    assert.equal(parsePasteHex(undefined).ok, false);
+    assert.equal(parsePasteHex(undefined).error, '');
+  });
+
+  it('14. parsePasteHex 0x prefix with valid even hex', () => {
+    const r = parsePasteHex('0x4E4F');
+    assert.ok(r.ok);
+    assert.equal(r.needle.length, 2);
+    assert.deepEqual(Array.from(r.needle), [0x4e, 0x4f]);
+  });
+
+  it('15. parsePasteHex rejects text that is a mix of valid hex and non-hex chars', () => {
+    const r = parsePasteHex('HEAD');
+    assert.equal(r.ok, false);
+    assert.ok(r.error.length > 0);
+  });
+
+  it('16. Case A: overwrite from start index with smaller paste (truncates at end)', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const edits = collectOverwriteEdits(bytes, 2, new Uint8Array([0xaa, 0xbb]));
+    assert.equal(edits.length, 2);
+    assert.equal(edits[0].index, 2);
+    assert.equal(edits[0].before, 0x33);
+    assert.equal(edits[0].after, 0xaa);
+    assert.equal(edits[1].index, 3);
+    assert.equal(edits[1].before, 0x44);
+    assert.equal(edits[1].after, 0xbb);
+    const next = new Uint8Array(bytes);
+    for (const e of edits) next[e.index] = e.after;
+    assert.deepEqual(Array.from(next), [0x11, 0x22, 0xaa, 0xbb, 0x55]);
+  });
+
+  it('17. Case B: overwrite within selection - only first N bytes of selection replaced', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const selectionStart = Math.min(1, 3);
+    const edits = collectOverwriteEdits(bytes, selectionStart, new Uint8Array([0xaa, 0xbb]));
+    assert.equal(edits.length, 2);
+    assert.equal(edits[0].index, 1);
+    assert.equal(edits[0].after, 0xaa);
+    assert.equal(edits[1].index, 2);
+    assert.equal(edits[1].after, 0xbb);
+    const next = new Uint8Array(bytes);
+    for (const e of edits) next[e.index] = e.after;
+    assert.deepEqual(Array.from(next), [0x11, 0xaa, 0xbb, 0x44, 0x55]);
+  });
+
+  it('18. Case C: paste larger than remaining buffer - truncated at buffer end', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const edits = collectOverwriteEdits(bytes, 3, new Uint8Array([0xaa, 0xbb, 0xcc, 0xdd]));
+    assert.equal(edits.length, 2);
+    assert.equal(edits[0].index, 3);
+    assert.equal(edits[0].after, 0xaa);
+    assert.equal(edits[1].index, 4);
+    assert.equal(edits[1].after, 0xbb);
+    const next = new Uint8Array(bytes);
+    for (const e of edits) next[e.index] = e.after;
+    assert.deepEqual(Array.from(next), [0x11, 0x22, 0x33, 0xaa, 0xbb]);
+    assert.equal(next.length, bytes.length, 'Buffer length unchanged');
+  });
+
+  it('19. Overwrite at index 0', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33]);
+    const edits = collectOverwriteEdits(bytes, 0, new Uint8Array([0xaa, 0xbb]));
+    const next = new Uint8Array(bytes);
+    for (const e of edits) next[e.index] = e.after;
+    assert.deepEqual(Array.from(next), [0xaa, 0xbb, 0x33]);
+  });
+
+  it('20. No-op edits produce no history entry', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0xaa, 0xbb, 0xcc]);
+    const edits = collectOverwriteEdits(bytes, 0, new Uint8Array([0xaa, 0xbb]));
+    assert.equal(edits.length, 0, 'No edits when values are identical');
+    const pushed = history.pushBatch(edits);
+    assert.equal(pushed, false, 'pushBatch should return false for empty edits');
+    assert.equal(history.getUndoCount(), 0);
+  });
+
+  it('21. One paste creates one batch history entry', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44]);
+    const edits = collectOverwriteEdits(bytes, 0, new Uint8Array([0xaa, 0x22, 0xbb, 0x44]));
+    const pushed = history.pushBatch(edits);
+    assert.equal(pushed, true);
+    assert.equal(history.getUndoCount(), 1);
+    assert.equal(history.getRedoCount(), 0);
+  });
+
+  it('22. Undo restores all pasted bytes (single batch)', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const edits = collectOverwriteEdits(bytes, 1, new Uint8Array([0xaa, 0xbb]));
+    history.pushBatch(edits);
+    for (const e of edits) bytes[e.index] = e.after;
+    assert.deepEqual(Array.from(bytes), [0x11, 0xaa, 0xbb, 0x44, 0x55]);
+
+    const undone = history.undo();
+    assert.ok(undone.isBatch);
+    assert.equal(undone.edits.length, 2);
+    for (const e of undone.edits) bytes[e.index] = e.before;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x33, 0x44, 0x55]);
+  });
+
+  it('23. Redo reapplies all pasted bytes (single batch)', () => {
+    const history = createEditHistory();
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const edits = collectOverwriteEdits(bytes, 1, new Uint8Array([0xaa, 0xbb]));
+    history.pushBatch(edits);
+    for (const e of edits) bytes[e.index] = e.after;
+    history.undo();
+    for (const e of edits) bytes[e.index] = e.before;
+    assert.deepEqual(Array.from(bytes), [0x11, 0x22, 0x33, 0x44, 0x55]);
+
+    const redone = history.redo();
+    assert.ok(redone.isBatch);
+    for (const e of redone.edits) bytes[e.index] = e.after;
+    assert.deepEqual(Array.from(bytes), [0x11, 0xaa, 0xbb, 0x44, 0x55]);
+  });
+
+  it('24. Selection start works regardless of anchor/cursor direction', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const start1 = Math.min(1, 3);
+    const start2 = Math.min(3, 1);
+    assert.equal(start1, 1);
+    assert.equal(start2, 1);
+    const edits1 = collectOverwriteEdits(bytes, start1, new Uint8Array([0xaa, 0xbb]));
+    const edits2 = collectOverwriteEdits(bytes, start2, new Uint8Array([0xaa, 0xbb]));
+    assert.equal(edits1.length, edits2.length);
+    assert.deepEqual(Array.from(edits1), Array.from(edits2));
+  });
+
+  it('25. Single selection (cursor === anchor) overwrites from cursor', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33, 0x44, 0x55]);
+    const cursorIdx = 2;
+    const start = Math.min(cursorIdx, cursorIdx);
+    assert.equal(start, 2);
+    const edits = collectOverwriteEdits(bytes, start, new Uint8Array([0xaa]));
+    assert.equal(edits.length, 1);
+    assert.equal(edits[0].index, 2);
+    assert.equal(edits[0].after, 0xaa);
+  });
+
+  it('26. collectOverwriteEdits with empty replacement returns empty array', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33]);
+    const edits = collectOverwriteEdits(bytes, 0, new Uint8Array([]));
+    assert.equal(edits.length, 0);
+  });
+
+  it('27. collectOverwriteEdits with null replacement returns empty array', () => {
+    const bytes = new Uint8Array([0x11, 0x22, 0x33]);
+    const edits = collectOverwriteEdits(bytes, 0, null);
+    assert.equal(edits.length, 0);
+  });
+
+  it('28. HexViewer source includes handlePaste function definition', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('const handlePaste ='), 'Should define handlePaste async function');
+    assert.ok(src.includes('parsePasteHex'), 'Should import parsePasteHex');
+  });
+
+  it('29. HexViewer source includes Ctrl+V handler in handleKeyDown', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes("e.key === 'v' || e.key === 'V'"), 'Should match Ctrl+V key');
+    assert.ok(src.includes('handlePaste()'), 'Should call handlePaste on Ctrl+V');
+  });
+
+  it('30. Ctrl+V handler calls e.preventDefault()', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const vIdx = src.indexOf("e.key === 'v' || e.key === 'V'");
+    assert.ok(vIdx !== -1, 'Should find Ctrl+V handler');
+    const block = src.slice(vIdx - 200, vIdx + 200);
+    assert.ok(block.includes('e.preventDefault()'), 'Ctrl+V handler should call preventDefault');
+  });
+
+  it('31. Ctrl+V handler is after isEditableFormControl guard', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const formControlIdx = src.indexOf('isEditableFormControl(e.target)');
+    assert.ok(formControlIdx !== -1, 'Should have isEditableFormControl guard');
+    const vIdx = src.indexOf("e.key === 'v' || e.key === 'V'");
+    assert.ok(vIdx !== -1, 'Should have Ctrl+V handler');
+    assert.ok(vIdx > formControlIdx, 'Ctrl+V handler must come AFTER form-control guard');
+  });
+
+  it('32. Ctrl+V does not interfere with Ctrl+Z (Undo)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const undoIdx = src.indexOf("e.key === 'z' || e.key === 'Z')");
+    const vIdx = src.indexOf("e.key === 'v' || e.key === 'V'");
+    assert.ok(undoIdx !== -1, 'Should have Ctrl+Z handler');
+    assert.ok(vIdx !== -1, 'Should have Ctrl+V handler');
+    const zBlock = src.slice(undoIdx, undoIdx + 300);
+    assert.ok(zBlock.includes('handleUndo'), 'Ctrl+Z should call handleUndo');
+    const vBlock = src.slice(vIdx, vIdx + 300);
+    assert.ok(vBlock.includes('handlePaste'), 'Ctrl+V should call handlePaste');
+  });
+
+  it('33. Ctrl+V does not interfere with Ctrl+Y (Redo)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const yIdx = src.indexOf("e.key === 'y' || e.key === 'Y'");
+    assert.ok(yIdx !== -1, 'Should have Ctrl+Y handler');
+    const yBlock = src.slice(yIdx, yIdx + 200);
+    assert.ok(yBlock.includes('handleRedo'), 'Ctrl+Y should call handleRedo');
+  });
+
+  it('34. Ctrl+V does not interfere with Ctrl+G (Find)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const gIdx = src.indexOf("e.key === 'g' || e.key === 'G'");
+    assert.ok(gIdx !== -1, 'Should have Ctrl+G handler');
+    const gBlock = src.slice(gIdx, gIdx + 200);
+    assert.ok(gBlock.includes('handleFindNext'), 'Ctrl+G should call handleFindNext');
+    assert.ok(gBlock.includes('handleFindPrevious'), 'Ctrl+Shift+G should call handleFindPrevious');
+  });
+
+  it('35. Ctrl+V does not interfere with Ctrl+C (Copy)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+     const cIdx = src.indexOf("e.key === 'c' || e.key === 'C'");
+     const vIdx = src.indexOf("e.key === 'v' || e.key === 'V'");
+     assert.ok(cIdx !== -1, 'Should have Ctrl+C handler');
+     assert.ok(vIdx !== -1, 'Should have Ctrl+V handler');
+     assert.ok(cIdx > vIdx, 'Ctrl+C should come after Ctrl+V (Ctrl+V placed before Ctrl+C in handler)');
+  });
+
+  it('36. Ctrl+V supports both ctrlKey and metaKey (Cmd on Mac)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    const vIdx = src.indexOf("e.key === 'v' || e.key === 'V'");
+    const block = src.slice(vIdx - 50, vIdx + 200);
+    assert.ok(block.includes('e.ctrlKey'), 'Should check ctrlKey');
+    assert.ok(block.includes('e.metaKey'), 'Should check metaKey');
+  });
+
+  it('37. Paste uses navigator.clipboard.readText', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('navigator.clipboard.readText'), 'Should use clipboard.readText for paste');
+    assert.ok(src.includes('parsePasteHex'), 'Should use parsePasteHex for validation');
+  });
+
+  it('38. Paste reuses collectOverwriteEdits and commitBatchEdits', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('collectOverwriteEdits'), 'Should use collectOverwriteEdits');
+    assert.ok(src.includes('commitBatchEdits'), 'Should use commitBatchEdits');
+  });
+
+  it('39. Paste preserves selection architecture (sets cursor to last pasted byte, anchor to pasteStart)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('setCursorIndex(newCursor)'), 'Should set cursor to last pasted byte');
+    assert.ok(src.includes('setAnchorIndex(pasteStart)'), 'Should set anchor to paste start');
+    assert.ok(src.includes('setHexNibble'), 'Should clear hex nibble state');
+  });
+
+  it('40. Paste sets copied state to pasted for feedback', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes("setCopied('pasted')"), 'Should set copied state to pasted');
+    assert.ok(src.includes('1200'), 'Should use 1200ms timeout like copy feedback');
+    assert.ok(src.includes("copied === 'pasted'"), 'Should display Pasted feedback in UI');
+  });
+
+  it('41. Paste error displayed via existing searchError', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const dir = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+    assert.ok(src.includes('setSearchError'), 'Should use existing searchError for paste errors');
+  });
+});

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Copy, Check, Save, Search, ChevronUp, ChevronDown, X, Undo, Redo } from 'lucide-react';
+import { Copy, Save, Search, ChevronUp, ChevronDown, X, Undo, Redo } from 'lucide-react';
 import { toHex } from '@/lib/crc32';
 import { formatBytes } from '@/lib/binaryUtils';
 import { createContiguousOffsetMap, isOffsetMap } from '@/lib/offsetMap';
@@ -25,6 +25,7 @@ import {
   formatByteValue,
   formatSelectionSize,
   createModifiedCounter,
+  parsePasteHex,
   parseSearchPattern,
   findNextMatch,
   findPreviousMatch,
@@ -557,6 +558,49 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
     lastMatchesRef.current = [];
   };
 
+  // Paste (Ctrl+V) handler - overwrites selected bytes with hex from clipboard
+  const handlePaste = async () => {
+    if (!bytes || bytes.length === 0) return;
+    setSearchError(null);
+    let text;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      setSearchError('Unable to read clipboard. Please paste via a supported browser.');
+      return;
+    }
+
+    const parsed = parsePasteHex(text);
+    if (!parsed.ok) {
+      if (parsed.error === '') {
+        // empty / whitespace-only clipboard — silent no-op
+        return;
+      }
+      setSearchError(parsed.error);
+      return;
+    }
+
+    const pasteStart = Math.min(anchorIndex, cursorIndex);
+    const edits = collectOverwriteEdits(bytes, pasteStart, parsed.needle);
+    if (!edits.length) {
+      // No actual byte changes (e.g. identical content) — silent no-op, no history entry
+      return;
+    }
+
+    commitBatchEdits(edits);
+
+    // Move cursor to last actually pasted byte, anchor to paste start
+    const lastPasted = pasteStart + edits.length - 1;
+    const newCursor = clampIndex(lastPasted, bytes.length);
+    setCursorIndex(newCursor);
+    setAnchorIndex(pasteStart);
+    setHexNibble('');
+
+    // Feedback
+    setCopied('pasted');
+    setTimeout(() => setCopied(null), 1200);
+  };
+
   // Byte selection click handler
   const handleCellClick = (idx, pane, e) => {
     if (!bytes || bytes.length === 0) return;
@@ -572,7 +616,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
     }
   };
 
-   // Mouse drag selection handlers
+  // Mouse drag selection handlers
   const handleCellMouseDown = (idx, e) => {
     if (e.button !== 0) return;
     if (!bytes || bytes.length === 0) return;
@@ -637,6 +681,13 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
       e.preventDefault();
       if (e.shiftKey) handleFindPrevious();
       else handleFindNext();
+      return;
+    }
+
+    // Paste hex bytes (Ctrl+V / Cmd+V)
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
+      e.preventDefault();
+      handlePaste();
       return;
     }
 
@@ -717,13 +768,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
     >
       {/* Top Toolbar */}
       <div className="flex flex-wrap items-center gap-1.5 px-3 py-2 border-b border-border bg-card">
-        <button onClick={copyHex} title="Copy selected hex bytes to clipboard" className="flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent px-2.5 py-1 transition-colors">
-          {copied === 'hex' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />} Copy hex
-        </button>
-        <button onClick={copyAscii} title="Copy selected ASCII text to clipboard" className="flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent px-2.5 py-1 transition-colors">
-          {copied === 'ascii' ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />} Copy ASCII
-        </button>
-        <div className="h-4 w-px bg-border mx-1" />
+         <div className="h-4 w-px bg-border mx-1" />
         <button
           onClick={handleUndo}
           disabled={!historyRef.current.canUndo()}
@@ -1072,6 +1117,14 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
             <Copy className="w-3 h-3 mr-2" /> Copy ASCII
           </ContextMenuItem>
           <ContextMenuItem
+            onSelect={handlePaste}
+            disabled={!bytes || bytes.length === 0}
+          >
+            <Copy className="w-3 h-3 mr-2" /> Paste
+            <ContextMenuShortcut>Ctrl+V</ContextMenuShortcut>
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem
             onSelect={copyEditorOffset}
             disabled={!bytes || bytes.length === 0}
           >
@@ -1138,6 +1191,9 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
                 <span className={modifiedCounterRef.current.getCount() > 0 ? 'text-amber-500' : 'text-muted-foreground'}>
                   Modified: {modifiedCounterRef.current.getCount()}
                 </span>
+                {copied === 'pasted' && (
+                  <span className="text-emerald-600">Pasted</span>
+                )}
               </>
             );
           })()
@@ -1155,6 +1211,9 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
             <span className={modifiedCounterRef.current.getCount() > 0 ? 'text-amber-500' : 'text-muted-foreground'}>
               Modified: {modifiedCounterRef.current.getCount()}
             </span>
+            {copied === 'pasted' && (
+              <span className="text-emerald-600">Pasted</span>
+            )}
           </>
         )}
       </span>
