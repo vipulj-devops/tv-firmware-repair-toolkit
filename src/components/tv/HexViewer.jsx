@@ -640,6 +640,15 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
       return;
     }
 
+    // Copy selected bytes (Ctrl+C / Cmd+C)
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
+      e.preventDefault();
+      if (selectionCount > 0) {
+        copyHex();
+      }
+      return;
+    }
+
     // Navigation keys
     const navKeys = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'];
     if (navKeys.includes(e.key)) {

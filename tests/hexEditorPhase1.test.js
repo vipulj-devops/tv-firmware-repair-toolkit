@@ -2804,12 +2804,164 @@ describe('Phase 4B-4 — HexViewer Context Menu', () => {
       assert.ok(!offsetSpanClass.includes('onMouseDown'), 'Offset column should not have onMouseDown for drag');
    });
 
-   it('12. Drag threshold prevents accidental click-as-drag', () => {
-     // The threshold is ~3px, so sub-3px movements are treated as clicks
-     const threshold = 3;
-     assert.ok(!isDragMovement(0, 0, 1, 0, threshold));
-     assert.ok(!isDragMovement(0, 0, 2, 0, threshold));
-     assert.ok(!isDragMovement(0, 0, 0, 2, threshold));
-     assert.ok(isDragMovement(0, 0, 3, 0, threshold));
-   });
- });
+    it('12. Drag threshold prevents accidental click-as-drag', () => {
+      // The threshold is ~3px, so sub-3px movements are treated as clicks
+      const threshold = 3;
+      assert.ok(!isDragMovement(0, 0, 1, 0, threshold));
+      assert.ok(!isDragMovement(0, 0, 2, 0, threshold));
+      assert.ok(!isDragMovement(0, 0, 0, 2, threshold));
+      assert.ok(isDragMovement(0, 0, 3, 0, threshold));
+    });
+  });
+
+  describe('Phase 6 — Ctrl+C Copy Selected Bytes', () => {
+    it('1. handleKeyDown includes Ctrl+C handler', async () => {
+      const { readFileSync } = await import('node:fs');
+      const { join, dirname } = await import('node:path');
+      const { fileURLToPath } = await import('node:url');
+      const dir = dirname(fileURLToPath(import.meta.url));
+      const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+      assert.ok(src.includes("e.key === 'c' || e.key === 'C'"), 'Should match Ctrl+C key');
+      assert.ok(src.includes('copyHex'), 'Should call copyHex on Ctrl+C');
+    });
+
+    it('2. Ctrl+C handler calls e.preventDefault()', async () => {
+      const { readFileSync } = await import('node:fs');
+      const { join, dirname } = await import('node:path');
+      const { fileURLToPath } = await import('node:url');
+      const dir = dirname(fileURLToPath(import.meta.url));
+      const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+      // Find the Ctrl+C block and verify it calls preventDefault
+      const cKeyIdx = src.indexOf("e.key === 'c' || e.key === 'C'");
+      assert.ok(cKeyIdx !== -1, 'Should find Ctrl+C handler');
+      const block = src.slice(cKeyIdx - 200, cKeyIdx + 200);
+      assert.ok(block.includes('e.preventDefault()'), 'Ctrl+C handler should call preventDefault');
+    });
+
+    it('3. Ctrl+C handler is after isEditableFormControl guard', async () => {
+      const { readFileSync } = await import('node:fs');
+      const { join, dirname } = await import('node:path');
+      const { fileURLToPath } = await import('node:url');
+      const dir = dirname(fileURLToPath(import.meta.url));
+      const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+      const formControlIdx = src.indexOf('isEditableFormControl(e.target)');
+      assert.ok(formControlIdx !== -1, 'Should have isEditableFormControl guard');
+      const copyIdx = src.indexOf("e.key === 'c' || e.key === 'C'");
+      assert.ok(copyIdx !== -1, 'Should have Ctrl+C handler');
+      assert.ok(copyIdx > formControlIdx, 'Ctrl+C handler must come AFTER form-control guard');
+    });
+
+    it('4. Ctrl+C reuses copyHex (same function as context menu Copy Hex)', async () => {
+      const { readFileSync } = await import('node:fs');
+      const { join, dirname } = await import('node:path');
+      const { fileURLToPath } = await import('node:url');
+      const dir = dirname(fileURLToPath(import.meta.url));
+      const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+      // copyHex is used both by the toolbar button and the context menu
+      // Ctrl+C should also use it
+      const copyHexDef = src.indexOf('const copyHex = () =>');
+      assert.ok(copyHexDef !== -1, 'Should define copyHex');
+      const cHandlerIdx = src.indexOf("e.key === 'c' || e.key === 'C'");
+      const block = src.slice(cHandlerIdx, cHandlerIdx + 300);
+      assert.ok(block.includes('copyHex()'), 'Ctrl+C block should call copyHex()');
+    });
+
+    it('5. Ctrl+C does not interfere with Ctrl+Z (Undo)', async () => {
+      const { readFileSync } = await import('node:fs');
+      const { join, dirname } = await import('node:path');
+      const { fileURLToPath } = await import('node:url');
+      const dir = dirname(fileURLToPath(import.meta.url));
+      const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+      const undoIdx = src.indexOf("e.key === 'z' || e.key === 'Z')");
+      const copyIdx = src.indexOf("e.key === 'c' || e.key === 'C'");
+      assert.ok(undoIdx !== -1, 'Should have Ctrl+Z handler');
+      assert.ok(copyIdx !== -1, 'Should have Ctrl+C handler');
+      // Both must coexist - Ctrl+Z must still be present and unchanged
+      const zBlock = src.slice(undoIdx, undoIdx + 200);
+      assert.ok(zBlock.includes('handleUndo'), 'Ctrl+Z should call handleUndo');
+      assert.ok(zBlock.includes('handleRedo'), 'Ctrl+Shift+Z should call handleRedo');
+    });
+
+    it('6. Ctrl+C does not interfere with Ctrl+Y (Redo)', async () => {
+      const { readFileSync } = await import('node:fs');
+      const { join, dirname } = await import('node:path');
+      const { fileURLToPath } = await import('node:url');
+      const dir = dirname(fileURLToPath(import.meta.url));
+      const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+      const yIdx = src.indexOf("e.key === 'y' || e.key === 'Y'");
+      assert.ok(yIdx !== -1, 'Should have Ctrl+Y handler');
+      const yBlock = src.slice(yIdx, yIdx + 200);
+      assert.ok(yBlock.includes('handleRedo'), 'Ctrl+Y should call handleRedo');
+    });
+
+    it('7. Ctrl+C does not interfere with Ctrl+G (Find)', async () => {
+      const { readFileSync } = await import('node:fs');
+      const { join, dirname } = await import('node:path');
+      const { fileURLToPath } = await import('node:url');
+      const dir = dirname(fileURLToPath(import.meta.url));
+      const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+      const gIdx = src.indexOf("e.key === 'g' || e.key === 'G'");
+      assert.ok(gIdx !== -1, 'Should have Ctrl+G handler');
+      const gBlock = src.slice(gIdx, gIdx + 200);
+      assert.ok(gBlock.includes('handleFindNext'), 'Ctrl+G should call handleFindNext');
+      assert.ok(gBlock.includes('handleFindPrevious'), 'Ctrl+Shift+G should call handleFindPrevious');
+    });
+
+    it('8. Ctrl+C and Cmd+C both supported (metaKey)', async () => {
+      const { readFileSync } = await import('node:fs');
+      const { join, dirname } = await import('node:path');
+      const { fileURLToPath } = await import('node:url');
+      const dir = dirname(fileURLToPath(import.meta.url));
+      const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+      const cIdx = src.indexOf("e.key === 'c' || e.key === 'C'");
+      assert.ok(cIdx !== -1, 'Should have Ctrl+C handler');
+      const block = src.slice(cIdx - 50, cIdx + 200);
+      assert.ok(block.includes('e.ctrlKey'), 'Should check ctrlKey');
+      assert.ok(block.includes('e.metaKey'), 'Should check metaKey (Cmd on Mac)');
+    });
+
+    it('9. Ctrl+C only copies when selectionCount > 0', async () => {
+      const { readFileSync } = await import('node:fs');
+      const { join, dirname } = await import('node:path');
+      const { fileURLToPath } = await import('node:url');
+      const dir = dirname(fileURLToPath(import.meta.url));
+      const src = readFileSync(join(dir, '../src/components/tv/HexViewer.jsx'), 'utf8');
+
+      const cIdx = src.indexOf("e.key === 'c' || e.key === 'C'");
+      const block = src.slice(cIdx, cIdx + 300);
+      assert.ok(block.includes('selectionCount > 0'), 'Should guard on selectionCount > 0');
+      assert.ok(block.includes('copyHex()'), 'Should call copyHex only when selection exists');
+    });
+
+    it('10. Ctrl+C preserves existing selection semantics (getSelectionRange)', () => {
+      // When cursorIndex === anchorIndex (single byte), selectionCount = 1
+      // This matches the existing copyHex behavior which copies that single byte
+      const { start, end } = getSelectionRange(5, 5);
+      assert.equal(start, 5);
+      assert.equal(end, 5);
+      const count = Math.max(0, end - start + 1);
+      assert.equal(count, 1);
+
+      // When cursor > anchor (multi-byte selection)
+      const range2 = getSelectionRange(3, 10);
+      assert.equal(range2.start, 3);
+      assert.equal(range2.end, 10);
+      const count2 = Math.max(0, range2.end - range2.start + 1);
+      assert.equal(count2, 8);
+
+      // Reverse selection (anchor > cursor)
+      const range3 = getSelectionRange(10, 3);
+      assert.equal(range3.start, 3);
+      assert.equal(range3.end, 10);
+      const count3 = Math.max(0, range3.end - range3.start + 1);
+      assert.equal(count3, 8);
+    });
+  });
