@@ -86,6 +86,7 @@ function isMetadataPartition(p) {
       'GPT Header', 'GPT Array',
       'backup GPT header', 'backup GPT array',
       'GPT Backup Header', 'GPT Backup Array',
+      'Part_Map',
     ].includes(p.name)
   );
 }
@@ -244,11 +245,17 @@ export function selectDumpParts({
     raw.push(...gptMetadataParts(bytes, gptParts, fileSize));
   } else if (userAreaAnalysis && STRICT.has(userAreaAnalysis.tableType) && ua.length >= 1) {
     raw = [...ua];
+    if (userAreaAnalysis.tableType === 'emmc_1630_5840') {
+      raw.push(...emmc1630MetadataParts(ua, fileSize));
+    }
     raw.push(...firmware);
   } else if (gpt.length >= 1) {
     raw = [...gpt];
   } else if (ua.length >= 1) {
     raw = [...ua];
+    if (userAreaAnalysis && userAreaAnalysis.tableType === 'emmc_1630_5840') {
+      raw.push(...emmc1630MetadataParts(ua, fileSize));
+    }
   } else if (firmware.length >= 1) {
     raw = [...firmware];
   } else if (Array.isArray(filesystemHits) && filesystemHits.length >= 1) {
@@ -256,6 +263,30 @@ export function selectDumpParts({
   }
 
   return classifyDumpParts(raw, fileSize);
+}
+
+// Add eMMC 0x1630/0x5840 Part_Map metadata region (non-editable).
+// Derives size strictly from the first valid partition's startByte.
+function emmc1630MetadataParts(uaParts, fileSize = 0) {
+  if (!Array.isArray(uaParts) || !uaParts.length) return [];
+  const sorted = [...uaParts].sort((a, b) => a.startByte - b.startByte);
+  const first = sorted.find((p) => p.startByte > 0);
+  if (!first || first.startByte <= 0) return [];
+  const size = first.startByte;
+  const availableSize = fileSize > 0 ? Math.min(size, fileSize) : size;
+  return [{
+    index: 0,
+    name: 'Part_Map',
+    ptType: 'metadata',
+    startByte: 0,
+    size,
+    declaredSize: size,
+    availableSize,
+    fsType: 'raw',
+    vendorSource: 'emmc_1630_5840',
+    source: 'emmc_1630_5840',
+    isMetadata: true,
+  }];
 }
 
 // Add MBR/GPT metadata regions as visible metadata entries (non-editable).

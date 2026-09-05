@@ -1,4 +1,4 @@
-import { SECTOR, ascii, u32le, validRange } from '../binary.js';
+import { SECTOR, ascii, u16, u32le, validRange } from '../binary.js';
 
 // Vendor-neutral USER-area eMMC map (512-byte records). Header magic 0x1630 at 0;
 // entries magic 0x5840. The u32 at header+0x10 is unused (not a partition count).
@@ -13,8 +13,7 @@ function emmc1630MapName(bytes, offset) {
 
 function isEmmc1630MapEntry(bytes, recOff) {
   if (recOff + 0x20 > bytes.length) return false;
-  if (u32le(bytes, recOff) !== EMMC_1630_ENT) return false;
-  if (u32le(bytes, recOff + 4) !== 0) return false;
+  if (u16(bytes, recOff) !== EMMC_1630_ENT) return false;
   const startLba = u32le(bytes, recOff + 8);
   const sizeLba = u32le(bytes, recOff + 12);
   if (startLba === 0 || sizeLba === 0) return false;

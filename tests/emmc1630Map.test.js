@@ -9,6 +9,7 @@ import {
   isEmmc1630Map,
   userAreaToParts,
 } from '../src/lib/userAreaParser.js';
+import { selectDumpParts } from '../src/lib/userArea/selectDumpParts.js';
 import { autoMapPartitions, findGptOffset, hasGpt, parseMbr } from '../src/lib/emmc.js';
 
 const fixture = readFileSync(
@@ -67,6 +68,78 @@ describe('eMMC 0x1630/0x5840 Map', () => {
     assert.equal(parts[0].startByte, 0x200000);
     assert.equal(parts[0].size, 0x500000);
     assert.ok(!parts.some((p) => p.name === 'Part_Map'));
+  });
+
+  it('decodes Videocon MStar variant with non-zero entry metadata at +0x02..+0x07', () => {
+    const buf = new Uint8Array(512 * 4);
+    // Sector 0 Header
+    w16(buf, 0, 0x1630);
+    w32(buf, 16, 0x003f2000); // 4,136,960 LBA sectors
+
+    // Sector 1: MBOOT entry with non-zero metadata at +0x02..+0x07
+    w16(buf, 0x200, 0x5840);
+    w16(buf, 0x202, 0x5cb1);
+    w32(buf, 0x204, 0x54fd5797);
+    w32(buf, 0x208, 4096); // startLba (0x200000)
+    w32(buf, 0x20c, 6144); // sizeLba (0x300000)
+    buf.set(Buffer.from('MBOOT', 'ascii'), 0x210);
+
+    // Sector 2: system entry with non-zero metadata at +0x02..+0x07
+    w16(buf, 0x400, 0x5840);
+    w16(buf, 0x402, 0x2d2e);
+    w32(buf, 0x404, 0x2e1dc250);
+    w32(buf, 0x408, 44544); // startLba (0x15c0000)
+    w32(buf, 0x40c, 1638400); // sizeLba (0x32000000)
+    buf.set(Buffer.from('system', 'ascii'), 0x410);
+
+    assert.equal(isEmmc1630Map(buf), true);
+    const det = detectSocUserArea(buf, 0x100000000);
+    assert.equal(det.tableType, 'emmc_1630_5840');
+
+    const analysis = analyzeUserArea(buf, 0x100000000);
+    assert.equal(analysis.partitions.length, 2);
+
+    const mboot = analysis.partitions[0];
+    assert.equal(mboot.name, 'MBOOT');
+    assert.equal(mboot.offset, 0x200000);
+    assert.equal(mboot.size, 0x300000);
+
+    const system = analysis.partitions[1];
+    assert.equal(system.name, 'system');
+    assert.equal(system.offset, 0x15c0000);
+    assert.equal(system.size, 0x32000000);
+
+    const parts = userAreaToParts(analysis);
+    assert.equal(parts.length, 2);
+    assert.equal(parts[0].name, 'MBOOT');
+    assert.equal(parts[1].name, 'system');
+    assert.ok(!parts.some((p) => p.name === 'Part_Map'));
+
+    // selectDumpParts incorporates Part_Map as a metadata entry derived from first valid partition's startByte
+    const selected = selectDumpParts({ userAreaAnalysis: analysis, fileSize: 0x100000000, bytes: buf });
+    assert.equal(selected.length, 3);
+    assert.equal(selected[0].name, 'Part_Map');
+    assert.equal(selected[0].status, 'metadata');
+    assert.equal(selected[0].editable, false);
+    assert.equal(selected[0].startByte, 0);
+    assert.equal(selected[0].size, 0x200000);
+    assert.equal(selected[1].name, 'MBOOT');
+    assert.equal(selected[1].status, 'editable');
+    assert.equal(selected[2].name, 'system');
+    assert.equal(selected[2].status, 'editable');
+  });
+
+  it('safely omits Part_Map metadata if first partition has startByte 0', () => {
+    const buf = new Uint8Array(512 * 4);
+    w16(buf, 0, 0x1630);
+    w16(buf, 0x200, 0x5840);
+    w32(buf, 0x208, 0); // startLba 0
+    w32(buf, 0x20c, 100);
+    buf.set(Buffer.from('MBOOT', 'ascii'), 0x210);
+
+    const analysis = analyzeUserArea(buf, 0x100000);
+    const selected = selectDumpParts({ userAreaAnalysis: analysis, fileSize: 0x100000, bytes: buf });
+    assert.ok(!selected.some((p) => p.name === 'Part_Map'));
   });
 
   it('rejects a malformed header (wrong magic or non-zero reserved fields)', () => {

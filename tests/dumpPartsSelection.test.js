@@ -179,8 +179,9 @@ describe('known dumps: descriptor fallback does not steal structured maps', () =
     const { ua, fw, parts } = selectFromHead(head);
     assert.equal(fw.family, 'MStar');
     assert.equal(ua.tableType, 'emmc_1630_5840');
-    assert.equal(parts.length, 37);
-    assert.ok(parts.every((p) => p.ptType === 'emmc_1630_5840'));
+    assert.equal(parts.length, 38);
+    assert.ok(parts.every((p) => p.ptType === 'emmc_1630_5840' || p.ptType === 'metadata'));
+    assert.ok(parts.some((p) => p.name === 'Part_Map' && p.status === 'metadata'));
   });
 
   it('MStar ROM1 stays eMMC 0x1630/0x5840', {
@@ -190,8 +191,9 @@ describe('known dumps: descriptor fallback does not steal structured maps', () =
     const { ua, fw, parts } = selectFromHead(head);
     assert.equal(fw.family, 'MStar');
     assert.equal(ua.tableType, 'emmc_1630_5840');
-    assert.equal(parts.length, 25);
-    assert.ok(parts.every((p) => p.ptType === 'emmc_1630_5840'));
+    assert.equal(parts.length, 26);
+    assert.ok(parts.every((p) => p.ptType === 'emmc_1630_5840' || p.ptType === 'metadata'));
+    assert.ok(parts.some((p) => p.name === 'Part_Map' && p.status === 'metadata'));
   });
 
   it('Sony dump stays mtdparts with 63 partitions and boot/recovery offsets', {
