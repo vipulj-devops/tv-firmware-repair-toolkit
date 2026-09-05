@@ -1033,7 +1033,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
 
 
       {/* Table Headers */}
-      <div className="grid grid-cols-[80px_1fr_140px] gap-3 px-3 py-2 text-muted-foreground border-b border-border bg-muted/30 font-semibold text-[11px]">
+      <div className="grid grid-cols-[80px_1fr_220px] gap-3 px-3 py-2 text-muted-foreground border-b border-border bg-muted/30 font-semibold text-[11px]">
         <span>OFFSET</span>
         <span>BYTES (HEX)</span>
         <span>ASCII</span>
@@ -1064,7 +1064,7 @@ export default function HexViewer({ bytes = new Uint8Array(0), onEditByte, onEdi
               return (
                 <div
                   key={r}
-                  className={`grid grid-cols-[80px_1fr_140px] gap-3 px-3 ${isRowHi ? 'bg-emerald-500/10' : ''}`}
+                  className={`grid grid-cols-[80px_1fr_220px] gap-3 px-3 ${isRowHi ? 'bg-emerald-500/10' : ''}`}
                   style={{ height: ROW_HEIGHT }}
                 >
                   {/* Offset Column */}
