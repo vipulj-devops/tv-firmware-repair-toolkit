@@ -70,9 +70,9 @@ function isReg(inode) { return (inode.mode & 0xf000) === 0x8000; }
 function isSymlink(inode) { return (inode.mode & 0xf000) === 0xa000; }
 
 // Collect (logicalBlock, physicalBlock, len) by walking the extent tree.
-function collectExtents(bytes, blockOff, sb, out) {
+function collectExtentsFromTree(bytes, blockOff, sb, out) {
   const magic = u16(bytes, blockOff);
-  if (magic !== 0xf30a) return; // not extent-mapped (legacy indirect blocks unsupported)
+  if (magic !== 0xf30a) return;
   const entries = u16(bytes, blockOff + 2);
   const depth = u16(bytes, blockOff + 6);
   for (let i = 0; i < entries; i++) {
@@ -88,39 +88,161 @@ function collectExtents(bytes, blockOff, sb, out) {
       const leafLo = u32(bytes, e + 4);
       const leafHi = u16(bytes, e + 8);
       const leaf = leafLo + leafHi * 0x100000000;
-      collectExtents(bytes, leaf * sb.blockSize, sb, out);
+      collectExtentsFromTree(bytes, leaf * sb.blockSize, sb, out);
     }
+  }
+}
+
+function collectLegacyBlocks(bytes, blockOff, sb, out) {
+  const ptrsPerBlock = Math.floor(sb.blockSize / 4);
+  if (ptrsPerBlock <= 0) return;
+  const rawBlocks = [];
+
+  // 12 Direct blocks
+  for (let i = 0; i < 12; i++) {
+    const p = u32(bytes, blockOff + i * 4);
+    if (p > 0 && p < sb.blocksCount) {
+      rawBlocks.push({ logical: i, physical: p });
+    }
+  }
+
+  // Single indirect (index 12)
+  const singleInd = u32(bytes, blockOff + 12 * 4);
+  if (singleInd > 0 && singleInd < sb.blocksCount) {
+    const baseLog = 12;
+    const indOff = singleInd * sb.blockSize;
+    if (indOff + sb.blockSize <= bytes.length) {
+      for (let i = 0; i < ptrsPerBlock; i++) {
+        const p = u32(bytes, indOff + i * 4);
+        if (p > 0 && p < sb.blocksCount) {
+          rawBlocks.push({ logical: baseLog + i, physical: p });
+        }
+      }
+    }
+  }
+
+  // Double indirect (index 13)
+  const doubleInd = u32(bytes, blockOff + 13 * 4);
+  if (doubleInd > 0 && doubleInd < sb.blocksCount) {
+    const baseLog = 12 + ptrsPerBlock;
+    const dindOff = doubleInd * sb.blockSize;
+    if (dindOff + sb.blockSize <= bytes.length) {
+      for (let i = 0; i < ptrsPerBlock; i++) {
+        const sind = u32(bytes, dindOff + i * 4);
+        if (sind > 0 && sind < sb.blocksCount) {
+          const sindOff = sind * sb.blockSize;
+          if (sindOff + sb.blockSize <= bytes.length) {
+            for (let j = 0; j < ptrsPerBlock; j++) {
+              const p = u32(bytes, sindOff + j * 4);
+              if (p > 0 && p < sb.blocksCount) {
+                rawBlocks.push({ logical: baseLog + i * ptrsPerBlock + j, physical: p });
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Triple indirect (index 14)
+  const tripleInd = u32(bytes, blockOff + 14 * 4);
+  if (tripleInd > 0 && tripleInd < sb.blocksCount) {
+    const baseLog = 12 + ptrsPerBlock + ptrsPerBlock * ptrsPerBlock;
+    const tindOff = tripleInd * sb.blockSize;
+    if (tindOff + sb.blockSize <= bytes.length) {
+      for (let i = 0; i < ptrsPerBlock; i++) {
+        const dind = u32(bytes, tindOff + i * 4);
+        if (dind > 0 && dind < sb.blocksCount) {
+          const dindOff = dind * sb.blockSize;
+          if (dindOff + sb.blockSize <= bytes.length) {
+            for (let j = 0; j < ptrsPerBlock; j++) {
+              const sind = u32(bytes, dindOff + j * 4);
+              if (sind > 0 && sind < sb.blocksCount) {
+                const sindOff = sind * sb.blockSize;
+                if (sindOff + sb.blockSize <= bytes.length) {
+                  for (let k = 0; k < ptrsPerBlock; k++) {
+                    const p = u32(bytes, sindOff + k * 4);
+                    if (p > 0 && p < sb.blocksCount) {
+                      rawBlocks.push({ logical: baseLog + (i * ptrsPerBlock + j) * ptrsPerBlock + k, physical: p });
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  for (const b of rawBlocks) {
+    const last = out[out.length - 1];
+    if (last && last.logical + last.len === b.logical && last.physical + last.len === b.physical) {
+      last.len += 1;
+    } else {
+      out.push({ logical: b.logical, physical: b.physical, len: 1 });
+    }
+  }
+}
+
+function collectExtents(bytes, inodeOrBlockOff, sb, out) {
+  let blockOff;
+  let flags = 0;
+  if (typeof inodeOrBlockOff === 'object' && inodeOrBlockOff !== null) {
+    blockOff = inodeOrBlockOff.blockOff;
+    flags = inodeOrBlockOff.flags || 0;
+  } else {
+    blockOff = inodeOrBlockOff;
+  }
+
+  const magic = u16(bytes, blockOff);
+  const isExtent = magic === 0xf30a || ((flags & 0x80000) !== 0);
+
+  if (isExtent) {
+    collectExtentsFromTree(bytes, blockOff, sb, out);
+  } else if (!(flags & 0x10000000)) {
+    collectLegacyBlocks(bytes, blockOff, sb, out);
   }
 }
 
 function readDataBytesFromExtents(bytes, inode, sb, extents) {
+  const size = inodeSize(inode);
   if (!extents.length) {
     // fast symlink: data stored inline in i_block area
-    if (isSymlink(inode) && inodeSize(inode) <= 60) {
-      const s = inodeSize(inode);
-      const arr = new Uint8Array(s);
-      for (let i = 0; i < s; i++) arr[i] = bytes[inode.blockOff + i];
+    if (isSymlink(inode) && size <= 60) {
+      const arr = new Uint8Array(size);
+      for (let i = 0; i < size; i++) arr[i] = bytes[inode.blockOff + i];
+      return arr;
+    }
+    // inline data: stored in i_block area up to size (max 60)
+    if ((inode.flags & 0x10000000) && size > 0) {
+      const take = Math.min(size, 60);
+      const arr = new Uint8Array(size);
+      for (let i = 0; i < take; i++) arr[i] = bytes[inode.blockOff + i];
       return arr;
     }
     return new Uint8Array(0);
   }
-  extents.sort((a, b) => a.logical - b.logical);
-  const totalBlocks = extents.reduce((m, e) => Math.max(m, e.logical + e.len), 0);
-  const buf = new Uint8Array(totalBlocks * sb.blockSize);
+  if (size <= 0) return new Uint8Array(0);
+
+  const buf = new Uint8Array(size);
   for (const e of extents) {
     for (let b = 0; b < e.len; b++) {
-      const src = (e.physical + b) * sb.blockSize;
       const dst = (e.logical + b) * sb.blockSize;
-      if (src + sb.blockSize > bytes.length) continue;
-      buf.set(bytes.subarray(src, src + sb.blockSize), dst);
+      if (dst >= size) continue;
+      const src = (e.physical + b) * sb.blockSize;
+      if (src >= bytes.length) continue;
+      const take = Math.min(sb.blockSize, size - dst);
+      const chunk = bytes.subarray(src, Math.min(src + take, bytes.length));
+      buf.set(chunk, dst);
     }
   }
-  return buf.subarray(0, Math.min(buf.length, inodeSize(inode)));
+  return buf;
 }
 
 function readDataBytes(bytes, inode, sb) {
   const extents = [];
-  collectExtents(bytes, inode.blockOff, sb, extents);
+  collectExtents(bytes, inode, sb, extents);
   return readDataBytesFromExtents(bytes, inode, sb, extents);
 }
 
@@ -194,7 +316,7 @@ export function readFileBytes(bytes, inodeNum, sb) {
 export function readFileBytesWithInfo(bytes, inodeNum, sb) {
   const inode = readInode(bytes, inodeNum, sb);
   const extents = [];
-  collectExtents(bytes, inode.blockOff, sb, extents);
+  collectExtents(bytes, inode, sb, extents);
   return { bytes: readDataBytesFromExtents(bytes, inode, sb, extents), extents };
 }
 
@@ -202,7 +324,7 @@ export function readFileBytesWithInfo(bytes, inodeNum, sb) {
 export function getAllocatedSpace(bytes, inodeNum, sb) {
   const inode = readInode(bytes, inodeNum, sb);
   const extents = [];
-  collectExtents(bytes, inode.blockOff, sb, extents);
+  collectExtents(bytes, inode, sb, extents);
   if (!extents.length) return inodeSize(inode);
   extents.sort((a, b) => a.logical - b.logical);
   const totalBlocks = extents.reduce((m, e) => Math.max(m, e.logical + e.len), 0);
@@ -282,7 +404,7 @@ export function patchFile(bytes, inodeNum, sb, newContent) {
   const origSize = inodeSize(inode);
   const newBytes = encodePatchContent(newContent);
   const extents = [];
-  collectExtents(bytes, inode.blockOff, sb, extents);
+  collectExtents(bytes, inode, sb, extents);
   const plan = computeInPlacePatch({
     extents,
     blockSize: sb.blockSize,
@@ -470,7 +592,7 @@ export function growAndPatchFile(bytes, inodeNum, sb, newContent) {
   const neededBlocks = data.length === 0 ? 0 : Math.ceil(data.length / blockSize);
 
   const extents = [];
-  collectExtents(bytes, inode.blockOff, sb, extents);
+  collectExtents(bytes, inode, sb, extents);
   if (!extents.length) throw new Error('File has no extent-mapped data blocks (unsupported layout).');
   extents.sort((a, b) => a.logical - b.logical);
   const currentBlocks = extents.reduce((m, e) => Math.max(m, e.logical + e.len), 0);
@@ -515,7 +637,7 @@ export function growAndPatchFile(bytes, inodeNum, sb, newContent) {
   buildExtentTree(bytes, inode, sb, coalesced);
   // 6. Write file content into all data blocks (old + new).
   const finalExtents = [];
-  collectExtents(bytes, inode.blockOff, sb, finalExtents);
+  collectExtents(bytes, inode, sb, finalExtents);
   finalExtents.sort((a, b) => a.logical - b.logical);
   let written = 0;
   for (const e of finalExtents) {
@@ -573,7 +695,7 @@ function removeDirent(bytes, parentInodeNum, sb, name) {
   const inode = readInode(bytes, parentInodeNum, sb);
   if (!isDir(inode)) return false;
   const extents = [];
-  collectExtents(bytes, inode.blockOff, sb, extents);
+  collectExtents(bytes, inode, sb, extents);
   for (const e of extents) {
     for (let b = 0; b < e.len; b++) {
       const blockOff = (e.physical + b) * sb.blockSize;
@@ -607,7 +729,7 @@ export function deleteFile(bytes, inodeNum, sb, path) {
   if (!isReg(inode)) throw new Error('Only regular files can be deleted');
   const freed = [];
   const extents = [];
-  collectExtents(bytes, inode.blockOff, sb, extents);
+  collectExtents(bytes, inode, sb, extents);
   for (const e of extents) {
     for (let b = 0; b < e.len; b++) freed.push(e.physical + b);
   }
@@ -689,7 +811,7 @@ function resolveDirInode(bytes, sb, dirPath) {
 function addDirent(bytes, parentInode, sb, name, targetInode) {
   const blockSize = sb.blockSize;
   const extents = [];
-  collectExtents(bytes, parentInode.blockOff, sb, extents);
+  collectExtents(bytes, parentInode, sb, extents);
   extents.sort((a, b) => a.logical - b.logical);
   const currentBlocks = extents.reduce((m, e) => Math.max(m, e.logical + e.len), 0);
 

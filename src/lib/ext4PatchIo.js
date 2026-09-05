@@ -22,7 +22,7 @@ export async function patchExistingFileIo(io, inodeNum, sb, newContent) {
   const inode = await readInodeRange(io, inodeNum, sb);
   if (!isReg(inode)) throw new Error('Not a regular file');
   const extents = [];
-  await collectExtentsRange(io, inode.iBlock, sb, extents);
+  await collectExtentsRange(io, inode, sb, extents);
   const newBytes = encodePatchContent(newContent);
   const plan = computeInPlacePatch({
     extents,
@@ -419,7 +419,7 @@ function collectIndexLeafBlocksRange(iBlock) {
 export async function addDirentIo(io, parentInode, sb, name, targetInode) {
   const blockSize = sb.blockSize;
   const extents = [];
-  await collectExtentsRange(io, parentInode.iBlock, sb, extents);
+  await collectExtentsRange(io, parentInode, sb, extents);
   extents.sort((a, b) => a.logical - b.logical);
   const currentBlocks = extents.reduce((m, e) => Math.max(m, e.logical + e.len), 0);
 
@@ -540,7 +540,7 @@ export async function removeDirentIo(io, parentInodeNum, sb, name) {
   const parentInode = await readInodeRange(io, parentInodeNum, sb);
   if (!isDir(parentInode)) return false;
   const extents = [];
-  await collectExtentsRange(io, parentInode.iBlock, sb, extents);
+  await collectExtentsRange(io, parentInode, sb, extents);
   for (const e of extents) {
     for (let b = 0; b < e.len; b++) {
       const blockOff = (e.physical + b) * sb.blockSize;
@@ -592,7 +592,7 @@ export async function deleteFileIo(io, sb, dirPathOrPath, name) {
 
   let targetInodeNum = 0;
   const parentExtents = [];
-  await collectExtentsRange(io, parentInode.iBlock, sb, parentExtents);
+  await collectExtentsRange(io, parentInode, sb, parentExtents);
 
   for (const e of parentExtents) {
     for (let b = 0; b < e.len; b++) {
@@ -631,7 +631,7 @@ export async function deleteFileIo(io, sb, dirPathOrPath, name) {
 
   const freed = [];
   const extents = [];
-  await collectExtentsRange(io, targetInode.iBlock, sb, extents);
+  await collectExtentsRange(io, targetInode, sb, extents);
   for (const e of extents) {
     for (let b = 0; b < e.len; b++) freed.push(e.physical + b);
   }
@@ -665,7 +665,7 @@ export async function growAndPatchFileIo(io, inodeNum, sb, newContent) {
   const neededBlocks = data.length === 0 ? 0 : Math.ceil(data.length / blockSize);
 
   const extents = [];
-  await collectExtentsRange(io, inode.iBlock, sb, extents);
+  await collectExtentsRange(io, inode, sb, extents);
   if (!extents.length) throw new Error('File has no extent-mapped data blocks (unsupported layout).');
   extents.sort((a, b) => a.logical - b.logical);
   const currentBlocks = extents.reduce((m, e) => Math.max(m, e.logical + e.len), 0);

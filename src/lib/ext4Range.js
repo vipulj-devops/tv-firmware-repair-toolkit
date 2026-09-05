@@ -40,7 +40,7 @@ export async function readInodeRange(reader, inodeNum, sb) {
   };
 }
 
-export async function collectExtentsRange(reader, node, sb, out) {
+async function collectExtentsRangeTree(reader, node, sb, out) {
   const magic = u16(node, 0);
   if (magic !== 0xf30a) return;
   const entries = u16(node, 2);
@@ -61,8 +61,126 @@ export async function collectExtentsRange(reader, node, sb, out) {
       const leafHi = u16(buf, e + 8);
       const leaf = leafLo + leafHi * 0x100000000;
       const child = await reader.read(leaf * sb.blockSize, sb.blockSize);
-      await collectExtentsRange(reader, child, sb, out);
+      await collectExtentsRangeTree(reader, child, sb, out);
     }
+  }
+}
+
+async function collectLegacyBlocksRange(reader, iBlock, sb, out) {
+  const ptrsPerBlock = Math.floor(sb.blockSize / 4);
+  if (ptrsPerBlock <= 0) return;
+  const rawBlocks = [];
+
+  // 12 Direct blocks
+  for (let i = 0; i < 12; i++) {
+    const p = u32(iBlock, i * 4);
+    if (p > 0 && p < sb.blocksCount) {
+      rawBlocks.push({ logical: i, physical: p });
+    }
+  }
+
+  // Single indirect
+  const singleInd = u32(iBlock, 12 * 4);
+  if (singleInd > 0 && singleInd < sb.blocksCount) {
+    const baseLog = 12;
+    const indOff = singleInd * sb.blockSize;
+    if (indOff + sb.blockSize <= reader.size) {
+      const indBlock = await reader.read(indOff, sb.blockSize);
+      for (let i = 0; i < ptrsPerBlock; i++) {
+        const p = u32(indBlock, i * 4);
+        if (p > 0 && p < sb.blocksCount) {
+          rawBlocks.push({ logical: baseLog + i, physical: p });
+        }
+      }
+    }
+  }
+
+  // Double indirect
+  const doubleInd = u32(iBlock, 13 * 4);
+  if (doubleInd > 0 && doubleInd < sb.blocksCount) {
+    const baseLog = 12 + ptrsPerBlock;
+    const dindOff = doubleInd * sb.blockSize;
+    if (dindOff + sb.blockSize <= reader.size) {
+      const dindBlock = await reader.read(dindOff, sb.blockSize);
+      for (let i = 0; i < ptrsPerBlock; i++) {
+        const sind = u32(dindBlock, i * 4);
+        if (sind > 0 && sind < sb.blocksCount) {
+          const sindOff = sind * sb.blockSize;
+          if (sindOff + sb.blockSize <= reader.size) {
+            const sindBlock = await reader.read(sindOff, sb.blockSize);
+            for (let j = 0; j < ptrsPerBlock; j++) {
+              const p = u32(sindBlock, j * 4);
+              if (p > 0 && p < sb.blocksCount) {
+                rawBlocks.push({ logical: baseLog + i * ptrsPerBlock + j, physical: p });
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Triple indirect
+  const tripleInd = u32(iBlock, 14 * 4);
+  if (tripleInd > 0 && tripleInd < sb.blocksCount) {
+    const baseLog = 12 + ptrsPerBlock + ptrsPerBlock * ptrsPerBlock;
+    const tindOff = tripleInd * sb.blockSize;
+    if (tindOff + sb.blockSize <= reader.size) {
+      const tindBlock = await reader.read(tindOff, sb.blockSize);
+      for (let i = 0; i < ptrsPerBlock; i++) {
+        const dind = u32(tindBlock, i * 4);
+        if (dind > 0 && dind < sb.blocksCount) {
+          const dindOff = dind * sb.blockSize;
+          if (dindOff + sb.blockSize <= reader.size) {
+            const dindBlock = await reader.read(dindOff, sb.blockSize);
+            for (let j = 0; j < ptrsPerBlock; j++) {
+              const sind = u32(dindBlock, j * 4);
+              if (sind > 0 && sind < sb.blocksCount) {
+                const sindOff = sind * sb.blockSize;
+                if (sindOff + sb.blockSize <= reader.size) {
+                  const sindBlock = await reader.read(sindOff, sb.blockSize);
+                  for (let k = 0; k < ptrsPerBlock; k++) {
+                    const p = u32(sindBlock, k * 4);
+                    if (p > 0 && p < sb.blocksCount) {
+                      rawBlocks.push({ logical: baseLog + (i * ptrsPerBlock + j) * ptrsPerBlock + k, physical: p });
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  for (const b of rawBlocks) {
+    const last = out[out.length - 1];
+    if (last && last.logical + last.len === b.logical && last.physical + last.len === b.physical) {
+      last.len += 1;
+    } else {
+      out.push({ logical: b.logical, physical: b.physical, len: 1 });
+    }
+  }
+}
+
+export async function collectExtentsRange(reader, nodeOrInode, sb, out) {
+  let iBlock;
+  let flags = 0;
+  if (nodeOrInode && typeof nodeOrInode === 'object' && !ArrayBuffer.isView(nodeOrInode) && !(nodeOrInode instanceof Uint8Array)) {
+    iBlock = nodeOrInode.iBlock || nodeOrInode;
+    flags = nodeOrInode.flags || 0;
+  } else {
+    iBlock = nodeOrInode;
+  }
+
+  const magic = u16(iBlock, 0);
+  const isExtent = magic === 0xf30a || ((flags & 0x80000) !== 0);
+
+  if (isExtent) {
+    await collectExtentsRangeTree(reader, iBlock, sb, out);
+  } else if (!(flags & 0x10000000)) {
+    await collectLegacyBlocksRange(reader, iBlock, sb, out);
   }
 }
 
@@ -70,28 +188,36 @@ async function readDataRangeFromExtents(reader, inode, sb, extents) {
   const iSize = inodeSizeOf(inode);
   if (!extents.length) {
     if (isLnk(inode) && iSize <= 60) return inode.iBlock.subarray(0, iSize);
+    if ((inode.flags & 0x10000000) && iSize > 0) {
+      const take = Math.min(iSize, 60);
+      const arr = new Uint8Array(iSize);
+      arr.set(inode.iBlock.subarray(0, take), 0);
+      return arr;
+    }
     return new Uint8Array(0);
   }
-  extents.sort((a, b) => a.logical - b.logical);
-  const totalBlocks = extents.reduce((m, e) => Math.max(m, e.logical + e.len), 0);
-  const buf = new Uint8Array(Math.min(totalBlocks * sb.blockSize, iSize + sb.blockSize));
+  if (iSize <= 0) return new Uint8Array(0);
+
+  const buf = new Uint8Array(iSize);
   for (const e of extents) {
     for (let b = 0; b < e.len; b++) {
       const dst = (e.logical + b) * sb.blockSize;
-      if (dst >= iSize && dst >= buf.length) continue;
+      if (dst >= iSize) continue;
       const srcOff = (e.physical + b) * sb.blockSize;
       if (srcOff >= reader.size) continue;
-      const chunk = await reader.read(srcOff, Math.min(sb.blockSize, reader.size - srcOff));
-      const take = Math.min(chunk.length, buf.length - dst);
-      if (take > 0) buf.set(chunk.subarray(0, take), dst);
+      const take = Math.min(sb.blockSize, Math.min(iSize - dst, reader.size - srcOff));
+      if (take > 0) {
+        const chunk = await reader.read(srcOff, take);
+        buf.set(chunk.subarray(0, take), dst);
+      }
     }
   }
-  return buf.subarray(0, Math.min(buf.length, iSize));
+  return buf;
 }
 
 async function readDataRange(reader, inode, sb) {
   const extents = [];
-  await collectExtentsRange(reader, inode.iBlock, sb, extents);
+  await collectExtentsRange(reader, inode, sb, extents);
   return readDataRangeFromExtents(reader, inode, sb, extents);
 }
 
@@ -178,7 +304,7 @@ export async function listFilesRange(reader, sb, maxDepth = 8) {
         await walk(e.inode, childPath, depth + 1);
       } else if (isReg(child)) {
         const extents = [];
-        await collectExtentsRange(reader, child.iBlock, sb, extents);
+        await collectExtentsRange(reader, child, sb, extents);
         const totalBlocks = extents.reduce((m, x) => Math.max(m, x.logical + x.len), 0);
         files.push({
           path: childPath,
@@ -202,14 +328,14 @@ export async function readFileBytesRange(reader, inodeNum, sb) {
 export async function readFileBytesRangeWithInfo(reader, inodeNum, sb) {
   const inode = await readInodeRange(reader, inodeNum, sb);
   const extents = [];
-  await collectExtentsRange(reader, inode.iBlock, sb, extents);
+  await collectExtentsRange(reader, inode, sb, extents);
   return { bytes: await readDataRangeFromExtents(reader, inode, sb, extents), extents, startByte: reader.startByte };
 }
 
 export async function getAllocatedSpaceRange(reader, inodeNum, sb) {
   const inode = await readInodeRange(reader, inodeNum, sb);
   const extents = [];
-  await collectExtentsRange(reader, inode.iBlock, sb, extents);
+  await collectExtentsRange(reader, inode, sb, extents);
   if (!extents.length) return inodeSizeOf(inode);
   const totalBlocks = extents.reduce((m, e) => Math.max(m, e.logical + e.len), 0);
   return totalBlocks * sb.blockSize;

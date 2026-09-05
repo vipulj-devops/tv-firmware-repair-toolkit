@@ -374,7 +374,7 @@ describe('patchExistingFileIo + overlay', () => {
     const image = buildMinimalExt4();
     const off = inode12Offset();
     wu32(image, off + 0x20, 0);
-    wu16(image, off + 0x28, 0);
+    for (let i = 0; i < 60; i += 1) image[off + 0x28 + i] = 0;
     const { io, sb } = overlayIoFor(image);
     await assert.rejects(() => patchExistingFileIo(io, 12, sb, 'x'), /unsupported layout/);
   });
