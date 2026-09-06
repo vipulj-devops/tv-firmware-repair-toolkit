@@ -28,23 +28,12 @@ import { parseSuperblockRange, listFilesRange, readFileBytesRange, readFileBytes
 import { patchExistingFileIo, createFileIo, growAndPatchFileIo, deleteFileIo } from '@/lib/ext4PatchIo';
 import { INPLACE_TOO_LARGE_MESSAGE, EXT4_BEST_EFFORT_NOTE } from '@/lib/exploreSession';
 import { buildExt4FileOffsetMap } from '@/lib/ext4OffsetMap';
+import { isBinaryFile } from '@/lib/binaryDetection';
+import { decodeTextFile, encodeTextFile } from '@/lib/textDecoding';
 import { createZip } from '@/lib/zipWriter';
 import { formatBytes } from '@/lib/binaryUtils';
 import HexViewer from '@/components/tv/HexViewer';
 import { Progress } from '@/components/ui/progress';
-
-const isBinaryFile = (path, raw) => {
-  if (/\.(bin|img|dat|fw|rom|dump)$/i.test(path)) return true;
-  const sample = raw.subarray(0, Math.min(raw.length, 1024));
-  if (!sample.length) return false;
-  let nonPrint = 0;
-  for (let i = 0; i < sample.length; i++) {
-    const b = sample[i];
-    if (b === 0) return true;
-    if (b < 9 || (b > 13 && b < 32) || b > 126) nonPrint++;
-  }
-  return nonPrint / sample.length > 0.1;
-};
 
 function buildTree(files) {
   const root = { name: '', path: '', children: {}, isDir: true };
@@ -183,6 +172,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
   const [rawBytes, setRawBytes] = useState(null);
   const [fileOffsetMap, setFileOffsetMap] = useState(null);
   const [isBinary, setIsBinary] = useState(false);
+  const [decodedMeta, setDecodedMeta] = useState(null);
   const [extracting, setExtracting] = useState(false);
   const [extractProgress, setExtractProgress] = useState(null);
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -240,10 +230,13 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
           if (bin) {
             setRawBytes(raw);
             setContent(''); setOrigContent('');
+            setDecodedMeta(null);
           } else {
             setRawBytes(null);
-            setContent(new TextDecoder('utf-8', { fatal: false }).decode(raw));
-            setOrigContent(new TextDecoder('utf-8', { fatal: false }).decode(raw));
+            const decoded = decodeTextFile(raw, selected.path);
+            setContent(decoded.displayText);
+            setOrigContent(decoded.displayText);
+            setDecodedMeta(decoded.meta);
           }
         }
         setError('');
@@ -252,6 +245,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
         setOrigContent('');
         setImgUrl(null);
         setFileOffsetMap(null);
+        setDecodedMeta(null);
       }
     };
     run();
@@ -314,9 +308,11 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
     if (!requireInPlace()) return;
     setError('');
     try {
+      const encoded = decodedMeta ? encodeTextFile(decodedMeta, content) : new TextEncoder().encode(content);
+      const encodedLen = encoded.length;
       if (memoryWritable) {
         const next = new Uint8Array(bytes);
-        const res = patchFile(next, selected.inode, sb, content);
+        const res = patchFile(next, selected.inode, sb, encoded);
         onPatched(next);
         setOrigContent(content);
         setSelected({ ...selected, size: res.newSize });
@@ -324,10 +320,9 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
         return;
       }
       const alloc = await getAllocatedSpaceRange(reader, selected.inode, sb);
-      const encoded = new TextEncoder().encode(content);
-      const res = encoded.length > alloc
-        ? await growAndPatchFileIo(reader, selected.inode, sb, content)
-        : await patchExistingFileIo(reader, selected.inode, sb, content);
+      const res = encodedLen > alloc
+        ? await growAndPatchFileIo(reader, selected.inode, sb, encoded)
+        : await patchExistingFileIo(reader, selected.inode, sb, encoded);
       onOverlayPatched?.();
       if (res.grown) setRangeRev((r) => r + 1);
       setOrigContent(content);
@@ -662,6 +657,7 @@ export default function Ext4Browser({ bytes, reader, readOnlyReason, onPatched, 
             {isImage(selected.path) ? <ImageIcon className="w-4 h-4 text-sky-500 shrink-0" /> : <FileText className="w-4 h-4 text-emerald-500 shrink-0" />}
             <span className="text-sm font-mono truncate">{selected.path}</span>
             <span className="text-xs text-muted-foreground shrink-0">{formatBytes(selected.size)}</span>
+            {decodedMeta?.isUbootEnv && <span className="text-xs text-emerald-600/70 bg-emerald-500/10 px-1.5 py-0.25 rounded">U-Boot env · CRC32</span>}
           </div>
           <div className="flex items-center gap-1.5 shrink-0">
             <button onClick={exportFile} className="flex items-center gap-1.5 text-xs rounded-md border border-border hover:bg-accent px-3 py-1.5 font-medium transition-colors">
